@@ -22,7 +22,11 @@ jobs:
 
       - name: Build Mac App
         run: |
-          pyinstaller --onefile --windowed --name "WhisperTranscriber" --collect-all whisper --collect-all imageio_ffmpeg transcriber.py
+          pyinstaller --noconfirm --windowed --name "WhisperTranscriber" \
+            --icon assets/icon.icns \
+            --collect-all whisper \
+            --collect-all imageio_ffmpeg \
+            transcriber_mac.py
 
       - name: Upload Mac App
         uses: actions/upload-artifact@v4

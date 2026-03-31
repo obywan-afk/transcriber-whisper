@@ -5,8 +5,10 @@
 ║                                                                              ║
 ║  Features:                                                                   ║
 ║  - Transcribe audio/video files to text                                      ║
+║  - Optional direct translation to English                                     ║
 ║  - Multiple language support (auto-detect or manual)                         ║
 ║  - Multiple model sizes (speed vs accuracy trade-off)                        ║
+║  - Local processing (no audio upload to OpenAI API)                           ║
 ║  - Save transcripts to text files                                            ║
 ║                                                                              ║
 ║  Supported formats: MP3, WAV, M4A, OGG, FLAC, MP4, WEBM, MKV, AVI           ║
@@ -117,7 +119,7 @@ try:
             out, err = process.communicate()
             
             if process.returncode != 0:
-                error_msg = err.decode() if err else "Unknown error"
+                error_msg = err.decode("utf-8", errors="ignore") if err else "Unknown error"
                 raise RuntimeError(f"FFmpeg failed to process audio: {error_msg}")
                 
         except Exception as e:
@@ -198,9 +200,14 @@ LANGUAGES = {
     "Polish": "pl",
     "Portuguese": "pt",
     "Russian": "ru",
-    "Chinese": "zh",
+    "Mandarin Chinese (Modern Standard)": "zh",
     "Japanese": "ja",
     "Korean": "ko"
+}
+
+OUTPUT_LANGUAGES = {
+    "Original language (transcribe)": "source",
+    "English (translate)": "en"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -322,16 +329,20 @@ def get_file_duration(filepath):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             startupinfo=startupinfo,
-            text=True
+            timeout=20
         )
         
+        stderr_text = (result.stderr or b"").decode("utf-8", errors="ignore")
+
         # Parse duration from stderr (FFmpeg outputs info to stderr)
-        for line in result.stderr.split('\n'):
+        for line in stderr_text.split('\n'):
             if 'Duration:' in line:
                 time_str = line.split('Duration:')[1].split(',')[0].strip()
                 parts = time_str.split(':')
                 hours, mins, secs = float(parts[0]), float(parts[1]), float(parts[2])
                 return hours * 3600 + mins * 60 + secs
+    except subprocess.TimeoutExpired:
+        logger.warning("Duration check timed out")
     except Exception as e:
         logger.warning(f"Could not get file duration: {e}")
     
@@ -349,7 +360,9 @@ class WhisperTranscriber:
         self.root = root
         self.model = None
         self.current_model_name = None
+        self.is_loading_model = False
         self.is_transcribing = False
+        self._is_closing = False
         self.transcription_start_time = None
         
         # Configure window
@@ -357,6 +370,7 @@ class WhisperTranscriber:
         
         # Check dependencies
         if not self._check_dependencies():
+            self.root.after(0, self.root.destroy)
             return
         
         # Build UI
@@ -387,6 +401,8 @@ class WhisperTranscriber:
         self.style = ttk.Style()
         self.style.configure("TCombobox", padding=5)
         self.style.configure("TProgressbar", thickness=8)
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
     
     def _check_dependencies(self):
         """Check if all required dependencies are available."""
@@ -400,7 +416,7 @@ class WhisperTranscriber:
         
         if errors:
             error_msg = "Missing dependencies:\n\n" + "\n".join(f"• {e}" for e in errors)
-            error_msg += "\n\nPlease run:\nuv pip install openai-whisper imageio-ffmpeg"
+            error_msg += "\n\nPlease run:\npip install openai-whisper imageio-ffmpeg"
             
             messagebox.showerror("Dependency Error", error_msg)
             logger.error(f"Dependency check failed: {errors}")
@@ -627,6 +643,34 @@ class WhisperTranscriber:
         self.lang_dropdown.pack(side="left", padx=(0, 30))
         
         ToolTip(self.lang_dropdown, "Select the spoken language in the audio.\n'Auto-detect' works well for most cases.\nManual selection can improve accuracy.")
+
+        # Output language / translation mode
+        tk.Label(
+            row,
+            text="Output:",
+            font=("Segoe UI", 10),
+            bg="white",
+            width=8,
+            anchor="w"
+        ).pack(side="left")
+
+        self.output_lang_var = tk.StringVar(value="Original language (transcribe)")
+        self.output_lang_dropdown = ttk.Combobox(
+            row,
+            textvariable=self.output_lang_var,
+            values=list(OUTPUT_LANGUAGES.keys()),
+            width=28,
+            state="readonly"
+        )
+        self.output_lang_dropdown.pack(side="left", padx=(0, 30))
+
+        ToolTip(
+            self.output_lang_dropdown,
+            "Choose transcription output mode:\n"
+            "• Original language = normal transcription\n"
+            "• English = Whisper's built-in translation\n\n"
+            "Note: OpenAI Whisper supports direct translation to English only."
+        )
         
         # Timestamps checkbox
         self.timestamps_var = tk.BooleanVar(value=False)
@@ -796,7 +840,7 @@ class WhisperTranscriber:
         
         tk.Label(
             footer,
-            text="Powered by OpenAI Whisper",
+            text="Local-only processing • OpenAI Whisper (no cloud upload)",
             font=("Segoe UI", 8),
             fg=ABB_GRAY,
             bg=ABB_LIGHT_GRAY
@@ -839,18 +883,28 @@ class WhisperTranscriber:
     
     def _load_model(self):
         """Load the selected Whisper model."""
+        if self.is_loading_model:
+            self._set_status("Model loading already in progress...")
+            return
+
+        if self.is_transcribing:
+            messagebox.showinfo("Busy", "Please wait for current transcription to finish.")
+            return
+
         model_name = self.model_var.get()
         
         # Check if same model is already loaded
         if self.model and self.current_model_name == model_name:
             messagebox.showinfo("Already Loaded", f"The {model_name} model is already loaded and ready.")
             return
+
+        self.is_loading_model = True
         
         def load_task():
             try:
                 self._set_loading_state(True, f"Loading {model_name} model...")
-                self.model_status_indicator.config(fg="#FFA500")  # Orange - loading
-                self.model_status_text.config(text=f"Loading {model_name}...")
+                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#FFA500"))  # Orange - loading
+                self._run_on_ui(lambda: self.model_status_text.config(text=f"Loading {model_name}..."))
                 
                 logger.info(f"Loading model: {model_name}")
                 start_time = time.time()
@@ -862,23 +916,34 @@ class WhisperTranscriber:
                 logger.info(f"Model loaded in {elapsed:.1f}s")
                 
                 # Update UI
-                self.model_status_indicator.config(fg="#00AA00")  # Green - loaded
-                self.model_status_text.config(text=f"{model_name.capitalize()} model ready ✓")
+                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#00AA00"))  # Green - loaded
+                self._run_on_ui(lambda: self.model_status_text.config(text=f"{model_name.capitalize()} model ready ✓"))
                 self._set_status(f"Model loaded successfully ({elapsed:.1f}s)")
                 
             except Exception as e:
                 logger.error(f"Failed to load model: {e}")
-                self.model_status_indicator.config(fg="#CC0000")  # Red - error
-                self.model_status_text.config(text="Failed to load")
-                messagebox.showerror("Error", f"Failed to load model:\n\n{str(e)}")
+                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#CC0000"))  # Red - error
+                self._run_on_ui(lambda: self.model_status_text.config(text="Failed to load"))
+                self._run_on_ui(lambda: messagebox.showerror("Error", f"Failed to load model:\n\n{str(e)}"))
                 self._set_status("Error loading model")
             finally:
+                self.is_loading_model = False
                 self._set_loading_state(False)
-        
-        threading.Thread(target=load_task, daemon=True).start()
+
+        try:
+            threading.Thread(target=load_task, daemon=True).start()
+        except Exception as e:
+            self.is_loading_model = False
+            self._set_status("Failed to start model loading")
+            logger.error(f"Could not start model loading thread: {e}")
+            messagebox.showerror("Error", f"Failed to start model loading:\n\n{str(e)}")
     
     def _browse_file(self):
         """Open file browser to select audio/video file."""
+        if self.is_transcribing or self.is_loading_model:
+            messagebox.showinfo("Busy", "Please wait for current task to finish.")
+            return
+
         filetypes = [
             ("Audio/Video files", " ".join(f"*{ext}" for ext in SUPPORTED_FORMATS)),
             ("Audio files", "*.mp3 *.wav *.m4a *.ogg *.flac"),
@@ -903,22 +968,35 @@ class WhisperTranscriber:
             logger.warning(f"Invalid file selected: {message}")
             return
         
-        self.file_path.set(filepath)
-        
-        # Get file info
-        path = Path(filepath)
-        size_mb = path.stat().st_size / (1024 * 1024)
-        duration = get_file_duration(filepath)
-        
-        info_parts = [f"📄 {path.name}", f"Size: {size_mb:.1f} MB"]
-        if duration:
-            info_parts.append(f"Duration: {format_duration(duration)}")
-        
-        self.file_info_label.config(text=" | ".join(info_parts))
-        logger.info(f"File selected: {filepath}")
+        try:
+            self.file_path.set(filepath)
+
+            # Get file info
+            path = Path(filepath)
+            size_mb = path.stat().st_size / (1024 * 1024)
+            duration = get_file_duration(filepath)
+
+            info_parts = [f"📄 {path.name}", f"Size: {size_mb:.1f} MB"]
+            if duration:
+                info_parts.append(f"Duration: {format_duration(duration)}")
+
+            self.file_info_label.config(text=" | ".join(info_parts))
+            logger.info(f"File selected: {filepath}")
+        except OSError as e:
+            logger.error(f"Could not read file metadata: {e}")
+            self.file_path.set("")
+            self.file_info_label.config(text="")
+            messagebox.showerror("File Error", f"Could not read file metadata:\n\n{e}")
     
     def _transcribe(self):
         """Start the transcription process."""
+        if self.is_transcribing:
+            return
+
+        if self.is_loading_model:
+            messagebox.showinfo("Busy", "Please wait for model loading to finish.")
+            return
+
         # Validation
         if not self.model:
             messagebox.showwarning(
@@ -942,24 +1020,32 @@ class WhisperTranscriber:
         language = LANGUAGES.get(lang_display)
         if language == "auto":
             language = None
+
+        output_mode_display = self.output_lang_var.get()
+        output_mode = OUTPUT_LANGUAGES.get(output_mode_display, "source")
+        whisper_task = "translate" if output_mode == "en" else "transcribe"
         
         include_timestamps = self.timestamps_var.get()
+        self.is_transcribing = True
+        self.transcription_start_time = time.time()
         
         def transcribe_task():
             try:
-                self.is_transcribing = True
                 self._set_loading_state(True, "Transcribing... This may take a while.")
-                self.transcription_start_time = time.time()
                 
                 # Show cancel button
-                self.root.after(0, lambda: self.cancel_btn.pack(side="left", padx=(0, 15)))
+                self._run_on_ui(lambda: self.cancel_btn.pack(side="left", padx=(0, 15)))
                 
-                logger.info(f"Starting transcription: {filepath}, language={language}, timestamps={include_timestamps}")
+                logger.info(
+                    f"Starting transcription: {filepath}, language={language}, "
+                    f"task={whisper_task}, timestamps={include_timestamps}"
+                )
                 
                 # Perform transcription
                 result = self.model.transcribe(
                     filepath,
                     language=language,
+                    task=whisper_task,
                     verbose=False
                 )
                 
@@ -975,23 +1061,36 @@ class WhisperTranscriber:
                     output_text = result["text"].strip()
                 
                 # Update UI
-                self.root.after(0, lambda: self._display_result(output_text, elapsed, result))
+                self._run_on_ui(
+                    lambda: self._display_result(
+                        output_text,
+                        elapsed,
+                        result,
+                        output_mode_display
+                    )
+                )
                 
                 logger.info(f"Transcription completed in {elapsed:.1f}s")
                 
             except Exception as e:
                 logger.error(f"Transcription failed: {e}")
-                self.root.after(0, lambda: messagebox.showerror(
+                self._run_on_ui(lambda: messagebox.showerror(
                     "Transcription Failed",
                     f"An error occurred during transcription:\n\n{str(e)}\n\nPlease check the file and try again."
                 ))
-                self.root.after(0, lambda: self._set_status("Transcription failed"))
+                self._set_status("Transcription failed")
             finally:
                 self.is_transcribing = False
-                self.root.after(0, lambda: self._set_loading_state(False))
-                self.root.after(0, lambda: self.cancel_btn.pack_forget())
-        
-        threading.Thread(target=transcribe_task, daemon=True).start()
+                self._set_loading_state(False)
+                self._run_on_ui(lambda: self.cancel_btn.pack_forget())
+
+        try:
+            threading.Thread(target=transcribe_task, daemon=True).start()
+        except Exception as e:
+            self.is_transcribing = False
+            self._set_status("Failed to start transcription")
+            logger.error(f"Could not start transcription thread: {e}")
+            messagebox.showerror("Transcription Failed", f"Could not start transcription:\n\n{str(e)}")
     
     def _format_with_timestamps(self, result):
         """Format transcription result with timestamps."""
@@ -1003,13 +1102,16 @@ class WhisperTranscriber:
             lines.append(f"[{start} → {end}]  {text}")
         return "\n\n".join(lines)
     
-    def _display_result(self, text, elapsed, result):
+    def _display_result(self, text, elapsed, result, output_mode_display):
         """Display the transcription result."""
         self.output.delete(1.0, tk.END)
         self.output.insert(tk.END, text)
         
         detected_lang = result.get("language", "unknown")
-        self._set_status(f"✓ Completed in {format_duration(elapsed)} | Detected language: {detected_lang}")
+        mode_label = "Translated to English" if "English" in output_mode_display else "Transcribed"
+        self._set_status(
+            f"✓ {mode_label} in {format_duration(elapsed)} | Detected language: {detected_lang}"
+        )
     
     def _cancel_transcription(self):
         """Cancel the current transcription."""
@@ -1030,7 +1132,10 @@ class WhisperTranscriber:
         default_name = "transcript.txt"
         if self.file_path.get():
             input_name = Path(self.file_path.get()).stem
-            default_name = f"{input_name}_transcript.txt"
+            if OUTPUT_LANGUAGES.get(self.output_lang_var.get()) == "en":
+                default_name = f"{input_name}_english_translation.txt"
+            else:
+                default_name = f"{input_name}_transcript.txt"
         
         filepath = filedialog.asksaveasfilename(
             title="Save Transcript",
@@ -1089,16 +1194,28 @@ HOW TO USE:
 
 3️⃣  (Optional) Set language if auto-detect fails
 
-4️⃣  Click "TRANSCRIBE" and wait
+4️⃣  Choose output mode:
+    • Original language (transcribe)
+    • English (translate)
 
-5️⃣  Save or copy your transcript
+5️⃣  Click "TRANSCRIBE" and wait
 
+6️⃣  Save or copy your transcript
 
 TIPS:
 • First model load downloads files (one-time)
+• Internet is only needed for first model download (unless models are already cached)
 • Longer files take more time
 • Clear audio = better results
 • Manually selecting language can improve accuracy
+• Whisper can directly translate speech to English
+• For non-English output translation, use another translation tool after transcription
+
+
+PRIVACY & TRANSPARENCY:
+• Transcription runs locally on this computer
+• Audio/video is NOT sent to the OpenAI API by this app
+• No account login is required for local transcription
 
 
 TROUBLESHOOTING:
@@ -1142,23 +1259,51 @@ TROUBLESHOOTING:
     
     def _set_loading_state(self, is_loading, message=None):
         """Set UI to loading/ready state."""
-        if is_loading:
-            self.progress.start(10)
-            self.transcribe_btn.config(state="disabled", bg=ABB_GRAY)
-            self.load_btn.config(state="disabled")
-            self.browse_btn.config(state="disabled")
-            if message:
-                self._set_status(message)
-        else:
-            self.progress.stop()
-            self.transcribe_btn.config(state="normal", bg=ABB_RED)
-            self.load_btn.config(state="normal")
-            self.browse_btn.config(state="normal")
+        def apply():
+            if is_loading:
+                self.progress.start(10)
+                self.transcribe_btn.config(state="disabled", bg=ABB_GRAY)
+                self.load_btn.config(state="disabled")
+                self.browse_btn.config(state="disabled")
+            else:
+                self.progress.stop()
+                self.transcribe_btn.config(state="normal", bg=ABB_RED)
+                self.load_btn.config(state="normal")
+                self.browse_btn.config(state="normal")
+
+        self._run_on_ui(apply)
+        if message:
+            self._set_status(message)
     
     def _set_status(self, message):
         """Update status message."""
-        self.status_var.set(message)
+        def apply():
+            if hasattr(self, "status_var"):
+                self.status_var.set(message)
+        self._run_on_ui(apply)
         logger.info(f"Status: {message}")
+
+    def _run_on_ui(self, callback):
+        """Run callback on Tk main thread safely."""
+        try:
+            if self._is_closing:
+                return
+            if threading.current_thread() is threading.main_thread():
+                callback()
+            elif self.root.winfo_exists():
+                self.root.after(0, callback)
+        except tk.TclError:
+            pass
+
+    def _on_close(self):
+        """Handle app close safely during active background operations."""
+        self._is_closing = True
+        self.is_loading_model = False
+        self.is_transcribing = False
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
