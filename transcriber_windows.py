@@ -1,53 +1,30 @@
 """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                        WHISPER TRANSCRIBER v1.0                              ║
-║                    Audio/Video to Text Transcription                         ║
-║                                                                              ║
-║  Features:                                                                   ║
-║  - Transcribe audio/video files to text                                      ║
-║  - Optional direct translation to English                                     ║
-║  - Multiple language support (auto-detect or manual)                         ║
-║  - Multiple model sizes (speed vs accuracy trade-off)                        ║
-║  - Local processing (no audio upload to OpenAI API)                           ║
-║  - Save transcripts to text files                                            ║
-║                                                                              ║
-║  Supported formats: MP3, WAV, M4A, OGG, FLAC, MP4, WEBM, MKV, AVI           ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+Whisper Transcriber — Windows
+Audio/Video to Text using OpenAI Whisper
 """
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# FIX FOR PYINSTALLER WINDOWED MODE - MUST BE AT THE VERY TOP
-# ═══════════════════════════════════════════════════════════════════════════════
 
 import sys
 import os
 
-# Redirect stdout/stderr to devnull if they don't exist (windowed mode)
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# IMPORTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
 import tkinter as tk
-from tkinter import filedialog, ttk, scrolledtext, messagebox
+from tkinter import filedialog, ttk, messagebox
 import threading
 import subprocess
 import logging
 import time
+import math
 from datetime import datetime
 from pathlib import Path
 
-# Suppress FP16 warning
 import warnings
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LOGGING CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 log_dir = Path.home() / ".whisper_transcriber"
 log_dir.mkdir(exist_ok=True)
@@ -60,1231 +37,1077 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# FFMPEG SETUP
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── FFmpeg ────────────────────────────────────────────────────────────────────
 
 try:
     import numpy as np
     import imageio_ffmpeg
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    logger.info(f"FFmpeg found at: {ffmpeg_exe}")
+    logger.info(f"FFmpeg: {ffmpeg_exe}")
 except ImportError as e:
-    logger.error(f"Failed to import required modules: {e}")
+    logger.error(f"Import error: {e}")
     ffmpeg_exe = None
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# WHISPER SETUP WITH PATCHED AUDIO LOADING
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Whisper ───────────────────────────────────────────────────────────────────
 
 try:
     import whisper
     import whisper.audio
-    
+
     def _patched_load_audio(file, sr=16000):
-        """Load audio file using FFmpeg with explicit path."""
         if not ffmpeg_exe:
-            raise RuntimeError("FFmpeg not found. Please reinstall imageio-ffmpeg.")
-        
+            raise RuntimeError("FFmpeg not found.")
         if not os.path.exists(file):
-            raise FileNotFoundError(f"Audio file not found: {file}")
-        
-        cmd = [
-            ffmpeg_exe,
-            "-nostdin",
-            "-threads", "0",
-            "-i", file,
-            "-f", "s16le",
-            "-ac", "1",
-            "-acodec", "pcm_s16le",
-            "-ar", str(sr),
-            "-"
-        ]
-        
-        try:
-            # Fix for PyInstaller --windowed mode (no console)
-            startupinfo = None
-            if os.name == 'nt':  # Windows
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                startupinfo=startupinfo
-            )
-            out, err = process.communicate()
-            
-            if process.returncode != 0:
-                error_msg = err.decode("utf-8", errors="ignore") if err else "Unknown error"
-                raise RuntimeError(f"FFmpeg failed to process audio: {error_msg}")
-                
-        except Exception as e:
-            raise RuntimeError(f"FFmpeg failed to process audio: {str(e)}")
-        
-        return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
-    
-    whisper.audio.load_audio = _patched_load_audio
-    logger.info("Whisper loaded successfully")
-    
-except ImportError as e:
-    logger.error(f"Failed to import Whisper: {e}")
-    whisper = None
+            raise FileNotFoundError(f"File not found: {file}")
 
-# ABB Brand Colors
-ABB_RED = "#FF000F"
-ABB_RED_HOVER = "#CC000C"
-ABB_DARK = "#1F1F1F"
-ABB_GRAY = "#6E6E6E"
-ABB_LIGHT_GRAY = "#F5F5F5"
-
-# Model information
-MODEL_INFO = {
-    "tiny": {
-        "size": "~39 MB",
-        "speed": "Fastest",
-        "accuracy": "Basic",
-        "description": "Best for quick drafts or clear audio",
-        "vram": "~1 GB"
-    },
-    "base": {
-        "size": "~74 MB", 
-        "speed": "Fast",
-        "accuracy": "Good",
-        "description": "Good balance for everyday use",
-        "vram": "~1 GB"
-    },
-    "small": {
-        "size": "~244 MB",
-        "speed": "Medium",
-        "accuracy": "Better",
-        "description": "Recommended for important transcripts",
-        "vram": "~2 GB"
-    },
-    "medium": {
-        "size": "~769 MB",
-        "speed": "Slow",
-        "accuracy": "Great",
-        "description": "High accuracy, requires patience",
-        "vram": "~5 GB"
-    },
-    "large": {
-        "size": "~1550 MB",
-        "speed": "Very Slow",
-        "accuracy": "Best",
-        "description": "Maximum accuracy, very slow on CPU",
-        "vram": "~10 GB"
-    }
-}
-
-# Supported file formats
-SUPPORTED_FORMATS = (
-    ".mp3", ".wav", ".m4a", ".ogg", ".flac",  # Audio
-    ".mp4", ".webm", ".mkv", ".avi", ".mov"    # Video
-)
-
-# Common languages
-LANGUAGES = {
-    "Auto-detect": "auto",
-    "English": "en",
-    "Finnish": "fi",
-    "Swedish": "sv",
-    "German": "de",
-    "French": "fr",
-    "Spanish": "es",
-    "Italian": "it",
-    "Dutch": "nl",
-    "Polish": "pl",
-    "Portuguese": "pt",
-    "Russian": "ru",
-    "Mandarin Chinese (Modern Standard)": "zh",
-    "Japanese": "ja",
-    "Korean": "ko"
-}
-
-OUTPUT_LANGUAGES = {
-    "Original language (transcribe)": "source",
-    "English (translate)": "en"
-}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TOOLTIP HELPER CLASS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class ToolTip:
-    """Create a tooltip for a given widget."""
-    
-    def __init__(self, widget, text, delay=500):
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.tooltip_window = None
-        self.scheduled_id = None
-        
-        widget.bind("<Enter>", self._schedule_tooltip)
-        widget.bind("<Leave>", self._hide_tooltip)
-        widget.bind("<ButtonPress>", self._hide_tooltip)
-    
-    def _schedule_tooltip(self, event=None):
-        self._hide_tooltip()
-        self.scheduled_id = self.widget.after(self.delay, self._show_tooltip)
-    
-    def _show_tooltip(self):
-        if self.tooltip_window:
-            return
-        
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        
-        self.tooltip_window = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        
-        # Style the tooltip
-        frame = tk.Frame(tw, background="#333333", borderwidth=1, relief="solid")
-        frame.pack()
-        
-        label = tk.Label(
-            frame,
-            text=self.text,
-            justify="left",
-            background="#333333",
-            foreground="white",
-            font=("Segoe UI", 9),
-            padx=8,
-            pady=5,
-            wraplength=300
-        )
-        label.pack()
-    
-    def _hide_tooltip(self, event=None):
-        if self.scheduled_id:
-            self.widget.after_cancel(self.scheduled_id)
-            self.scheduled_id = None
-        
-        if self.tooltip_window:
-            self.tooltip_window.destroy()
-            self.tooltip_window = None
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def validate_file(filepath):
-    """Validate that file exists and is a supported format."""
-    if not filepath:
-        return False, "No file selected"
-    
-    path = Path(filepath)
-    
-    if not path.exists():
-        return False, f"File not found: {filepath}"
-    
-    if not path.is_file():
-        return False, f"Not a file: {filepath}"
-    
-    if path.suffix.lower() not in SUPPORTED_FORMATS:
-        return False, f"Unsupported format: {path.suffix}\n\nSupported: {', '.join(SUPPORTED_FORMATS)}"
-    
-    return True, "OK"
-
-def format_duration(seconds):
-    """Format seconds into human-readable duration."""
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    elif seconds < 3600:
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{mins}m {secs}s"
-    else:
-        hours = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        return f"{hours}h {mins}m"
-
-def get_file_duration(filepath):
-    """Get audio/video file duration using FFmpeg."""
-    if not ffmpeg_exe:
-        return None
-    
-    try:
-        cmd = [
-            ffmpeg_exe,
-            "-i", filepath,
-            "-hide_banner"
-        ]
-        
-        # Fix for PyInstaller --windowed mode
         startupinfo = None
         if os.name == 'nt':
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        result = subprocess.run(
+
+        cmd = [
+            ffmpeg_exe, "-nostdin", "-threads", "0",
+            "-i", file, "-f", "s16le", "-ac", "1",
+            "-acodec", "pcm_s16le", "-ar", str(sr), "-"
+        ]
+        process = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo
+        )
+        out, err = process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(f"FFmpeg error: {err.decode(errors='ignore') if err else 'unknown'}")
+        return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+    whisper.audio.load_audio = _patched_load_audio
+    logger.info("Whisper loaded")
+
+except ImportError as e:
+    logger.error(f"Whisper import failed: {e}")
+    whisper = None
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+
+# Neutral light theme — clean, works well on Windows
+C_BG            = "#F3F3F3"   # window background (near-system)
+C_SURFACE       = "#FFFFFF"   # card / panel surface
+C_SURFACE_ALT   = "#FAFAFA"   # transcript area
+C_DROP          = "#F7F7F7"   # drop zone fill
+C_TEXT          = "#1A1A1A"   # primary text
+C_SECONDARY     = "#5A5A5A"   # secondary labels
+C_TERTIARY      = "#9A9A9A"   # hints, meta
+C_BORDER        = "#DCDCDC"   # borders / dividers
+C_BORDER_FOCUS  = "#0078D4"   # Windows blue on focus
+C_ACCENT        = "#0078D4"   # Windows 11 accent blue
+C_ACCENT_HOVER  = "#106EBE"   # slightly darker
+C_ACCENT_FG     = "#FFFFFF"   # text on accent
+C_SUCCESS       = "#107C10"   # green
+C_WARNING       = "#CA5010"   # orange
+C_DANGER        = "#C42B1C"   # red
+
+# ── Typography ────────────────────────────────────────────────────────────────
+
+UI_FONT         = "Segoe UI"
+MONO_FONT       = "Consolas"
+
+FONT_TITLE      = (UI_FONT, 16, "bold")
+FONT_SECTION    = (UI_FONT, 10, "bold")
+FONT_UI         = (UI_FONT, 10)
+FONT_UI_MED     = (UI_FONT, 10, "bold")
+FONT_SMALL      = (UI_FONT, 9)
+FONT_TINY       = (UI_FONT, 8)
+FONT_MONO       = (MONO_FONT, 10)
+FONT_MONO_SM    = (MONO_FONT, 9)
+FONT_BTN        = (UI_FONT, 10)
+FONT_BTN_PRI    = (UI_FONT, 10, "bold")
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+SUPPORTED_FORMATS = (
+    ".mp3", ".wav", ".m4a", ".ogg", ".flac",
+    ".mp4", ".webm", ".mkv", ".avi", ".mov"
+)
+
+MODEL_INFO = {
+    "tiny":   {"size": "39 MB",  "speed": "~1×",  "quality": "Basic",  "desc": "Quick drafts"},
+    "base":   {"size": "74 MB",  "speed": "~3×",  "quality": "Good",   "desc": "Everyday use"},
+    "small":  {"size": "244 MB", "speed": "~6×",  "quality": "Better", "desc": "Accurate"},
+    "medium": {"size": "769 MB", "speed": "~18×", "quality": "Great",  "desc": "High accuracy"},
+    "large":  {"size": "1.5 GB", "speed": "~32×", "quality": "Best",   "desc": "Maximum quality"},
+}
+
+LANGUAGES = {
+    "Auto-detect": None,
+    "English": "en", "Finnish": "fi", "Swedish": "sv",
+    "German": "de",  "French": "fr",  "Spanish": "es",
+    "Italian": "it", "Dutch": "nl",   "Polish": "pl",
+    "Portuguese": "pt", "Russian": "ru",
+    "Mandarin Chinese": "zh",
+    "Japanese": "ja", "Korean": "ko",
+}
+
+OUTPUT_MODES = {
+    "Transcribe (original language)": "source",
+    "Translate to English": "en",
+}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def validate_file(filepath):
+    if not filepath:
+        return False, "No file selected."
+    p = Path(filepath)
+    if not p.exists():
+        return False, f"File not found: {filepath}"
+    if not p.is_file():
+        return False, f"Not a file: {filepath}"
+    if p.suffix.lower() not in SUPPORTED_FORMATS:
+        return False, f"Unsupported format: {p.suffix}"
+    return True, "OK"
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+def format_clock(seconds):
+    m, s = int(seconds // 60), int(seconds % 60)
+    return f"{m:02d}:{s:02d}"
+
+def format_file_size(size_bytes):
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+def get_file_duration(filepath):
+    if not ffmpeg_exe:
+        return None
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        result = subprocess.run(
+            [ffmpeg_exe, "-i", filepath, "-hide_banner"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             startupinfo=startupinfo,
             timeout=20
         )
-        
-        stderr_text = (result.stderr or b"").decode("utf-8", errors="ignore")
-
-        # Parse duration from stderr (FFmpeg outputs info to stderr)
-        for line in stderr_text.split('\n'):
+        for line in (result.stderr or b"").decode("utf-8", errors="ignore").split('\n'):
             if 'Duration:' in line:
-                time_str = line.split('Duration:')[1].split(',')[0].strip()
-                parts = time_str.split(':')
-                hours, mins, secs = float(parts[0]), float(parts[1]), float(parts[2])
-                return hours * 3600 + mins * 60 + secs
-    except subprocess.TimeoutExpired:
-        logger.warning("Duration check timed out")
+                t = line.split('Duration:')[1].split(',')[0].strip()
+                h, m, s = t.split(':')
+                return float(h) * 3600 + float(m) * 60 + float(s)
     except Exception as e:
-        logger.warning(f"Could not get file duration: {e}")
-    
+        logger.warning(f"Duration check failed: {e}")
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION CLASS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Flat button widget ────────────────────────────────────────────────────────
+
+class FlatButton(tk.Label):
+    """A flat, hover-aware button consistent with the design system."""
+
+    def __init__(self, parent, text, command,
+                 bg=C_SURFACE, fg=C_TEXT,
+                 hover_bg=C_BORDER,
+                 active_bg=C_ACCENT, active_fg=C_ACCENT_FG,
+                 font=FONT_BTN,
+                 padx=14, pady=5,
+                 primary=False,
+                 **kwargs):
+        self._normal_bg  = C_ACCENT      if primary else bg
+        self._normal_fg  = C_ACCENT_FG   if primary else fg
+        self._hover_bg   = C_ACCENT_HOVER if primary else hover_bg
+        self._hover_fg   = C_ACCENT_FG   if primary else fg
+        self._command    = command
+        self._disabled   = False
+
+        super().__init__(
+            parent,
+            text=text,
+            font=font,
+            bg=self._normal_bg,
+            fg=self._normal_fg,
+            padx=padx,
+            pady=pady,
+            cursor="hand2",
+            **kwargs
+        )
+        self.bind("<Enter>",    self._on_enter)
+        self.bind("<Leave>",    self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+
+    def _on_enter(self, e=None):
+        if not self._disabled:
+            self.config(bg=self._hover_bg, fg=self._hover_fg)
+
+    def _on_leave(self, e=None):
+        if not self._disabled:
+            self.config(bg=self._normal_bg, fg=self._normal_fg)
+
+    def _on_click(self, e=None):
+        if not self._disabled and self._command:
+            self._command()
+
+    def set_disabled(self, disabled: bool):
+        self._disabled = disabled
+        if disabled:
+            self.config(bg=C_BORDER, fg=C_TERTIARY, cursor="")
+        else:
+            self.config(bg=self._normal_bg, fg=self._normal_fg, cursor="hand2")
+
+
+# ── Tooltip ───────────────────────────────────────────────────────────────────
+
+class ToolTip:
+    def __init__(self, widget, text, delay=500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tip = None
+        self._id = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._cancel)
+        widget.bind("<ButtonPress>", self._cancel)
+
+    def _schedule(self, e=None):
+        self._cancel()
+        self._id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        x = self.widget.winfo_rootx() + 8
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        outer = tk.Frame(tw, bg="#404040", padx=1, pady=1)
+        outer.pack()
+        tk.Label(
+            outer,
+            text=self.text,
+            justify="left",
+            bg="#2D2D2D",
+            fg="#F0F0F0",
+            font=(UI_FONT, 9),
+            padx=9, pady=6,
+            wraplength=300
+        ).pack()
+
+    def _cancel(self, e=None):
+        if self._id:
+            self.widget.after_cancel(self._id)
+            self._id = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+# ── Main Application ──────────────────────────────────────────────────────────
 
 class WhisperTranscriber:
-    """Main application class for Whisper Transcriber."""
-    
-    def __init__(self, root):
+
+    def __init__(self, root: tk.Tk):
         self.root = root
         self.model = None
         self.current_model_name = None
         self.is_loading_model = False
         self.is_transcribing = False
         self._is_closing = False
-        self.transcription_start_time = None
-        
-        # Configure window
+        self._transcription_start = None
+        self._elapsed_timer_id = None
+        self._file_duration = None
+
         self._setup_window()
-        
-        # Check dependencies
-        if not self._check_dependencies():
+        self._setup_styles()
+
+        if not self._check_deps():
             self.root.after(0, self.root.destroy)
             return
-        
-        # Build UI
-        self._create_header()
-        self._create_model_section()
-        self._create_file_section()
-        self._create_options_section()
-        self._create_action_section()
-        self._create_output_section()
-        self._create_footer()
-        
-        logger.info("Application initialized successfully")
-    
+
+        self._build_ui()
+        logger.info("App ready")
+
+    # ── Window ────────────────────────────────────────────────────────────────
+
     def _setup_window(self):
-        """Configure the main window."""
         self.root.title("Whisper Transcriber")
-        self.root.geometry("850x700")
-        self.root.minsize(700, 600)
-        self.root.configure(bg="white")
-        
-        # Center window on screen
+        self.root.geometry("760x700")
+        self.root.minsize(640, 560)
+        self.root.configure(bg=C_BG)
+        self.root.resizable(True, True)
+
         self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() - 850) // 2
-        y = (self.root.winfo_screenheight() - 700) // 2
-        self.root.geometry(f"+{x}+{y}")
-        
-        # Configure styles
-        self.style = ttk.Style()
-        self.style.configure("TCombobox", padding=5)
-        self.style.configure("TProgressbar", thickness=8)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.root.geometry(f"+{(sw - 760) // 2}+{(sh - 700) // 2}")
+
+        # Keyboard shortcuts
+        self.root.bind_all("<Control-o>",       lambda e: self._browse_file())
+        self.root.bind_all("<Control-s>",       lambda e: self._save_transcript())
+        self.root.bind_all("<Control-Shift-c>", lambda e: self._copy_transcript())
+        self.root.bind_all("<Control-Shift-C>", lambda e: self._copy_transcript())
+        self.root.bind_all("<Control-Return>",  lambda e: self._transcribe())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-    
-    def _check_dependencies(self):
-        """Check if all required dependencies are available."""
+
+    def _setup_styles(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            try:
+                style.theme_use("winnative")
+            except tk.TclError:
+                pass
+
+        style.configure(
+            "Thin.Horizontal.TProgressbar",
+            thickness=3,
+            troughcolor=C_BORDER,
+            background=C_ACCENT
+        )
+        style.configure("TCombobox", padding=4)
+        style.configure(
+            "TScrollbar",
+            troughcolor=C_BG,
+            background=C_BORDER
+        )
+
+    # ── Dependencies ─────────────────────────────────────────────────────────
+
+    def _check_deps(self):
         errors = []
-        
         if not ffmpeg_exe:
-            errors.append("FFmpeg not found. Please install imageio-ffmpeg.")
-        
+            errors.append("imageio-ffmpeg not found")
         if whisper is None:
-            errors.append("Whisper not found. Please install openai-whisper.")
-        
+            errors.append("openai-whisper not found")
         if errors:
-            error_msg = "Missing dependencies:\n\n" + "\n".join(f"• {e}" for e in errors)
-            error_msg += "\n\nPlease run:\npip install openai-whisper imageio-ffmpeg"
-            
-            messagebox.showerror("Dependency Error", error_msg)
-            logger.error(f"Dependency check failed: {errors}")
+            msg = "Missing dependencies:\n\n" + "\n".join(f"  • {e}" for e in errors)
+            msg += "\n\nInstall with:\n  pip install openai-whisper imageio-ffmpeg"
+            messagebox.showerror("Cannot Start", msg)
             return False
-        
         return True
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # UI CREATION METHODS
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def _create_header(self):
-        """Create the application header."""
-        header = tk.Frame(self.root, bg=ABB_RED, height=60)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        
-        title = tk.Label(
-            header,
-            text="🎙️  Whisper Transcriber",
-            font=("Segoe UI", 18, "bold"),
-            bg=ABB_RED,
-            fg="white"
-        )
-        title.pack(side="left", padx=20, pady=15)
-        
-        # Help button
-        help_btn = tk.Button(
-            header,
-            text="❓ Help",
-            font=("Segoe UI", 10),
-            bg="white",
-            fg=ABB_RED,
-            relief="flat",
-            cursor="hand2",
-            command=self._show_help
-        )
-        help_btn.pack(side="right", padx=20, pady=15)
-    
-    def _create_model_section(self):
-        """Create the model selection section."""
-        section = tk.LabelFrame(
-            self.root,
-            text=" Step 1: Select & Load Model ",
-            font=("Segoe UI", 11, "bold"),
-            fg=ABB_DARK,
-            bg="white",
-            padx=15,
-            pady=10
-        )
-        section.pack(fill="x", padx=20, pady=(15, 10))
-        
-        # Model selection row
-        row1 = tk.Frame(section, bg="white")
-        row1.pack(fill="x", pady=5)
-        
-        tk.Label(
-            row1,
-            text="Model:",
-            font=("Segoe UI", 10),
-            bg="white",
-            width=10,
-            anchor="w"
-        ).pack(side="left")
-        
-        self.model_var = tk.StringVar(value="base")
-        self.model_dropdown = ttk.Combobox(
-            row1,
-            textvariable=self.model_var,
-            values=list(MODEL_INFO.keys()),
-            width=12,
-            state="readonly"
-        )
-        self.model_dropdown.pack(side="left", padx=(0, 10))
-        self.model_dropdown.bind("<<ComboboxSelected>>", self._on_model_selected)
-        
-        ToolTip(self.model_dropdown, "Choose a model based on your needs:\n• Smaller = Faster but less accurate\n• Larger = Slower but more accurate")
-        
-        self.load_btn = tk.Button(
-            row1,
-            text="📥 Load Model",
-            font=("Segoe UI", 10, "bold"),
-            bg=ABB_RED,
-            fg="white",
-            relief="flat",
-            cursor="hand2",
-            padx=15,
-            pady=5,
-            command=self._load_model
-        )
-        self.load_btn.pack(side="left", padx=(0, 15))
-        
-        ToolTip(self.load_btn, "Load the selected model into memory.\nFirst load downloads the model (one-time).")
-        
-        # Status indicator
-        self.model_status_frame = tk.Frame(row1, bg="white")
-        self.model_status_frame.pack(side="left", fill="x", expand=True)
-        
-        self.model_status_indicator = tk.Label(
-            self.model_status_frame,
-            text="●",
-            font=("Segoe UI", 14),
-            fg="#CC0000",
-            bg="white"
-        )
-        self.model_status_indicator.pack(side="left")
-        
-        self.model_status_text = tk.Label(
-            self.model_status_frame,
-            text="No model loaded",
-            font=("Segoe UI", 10),
-            fg=ABB_GRAY,
-            bg="white"
-        )
-        self.model_status_text.pack(side="left", padx=5)
-        
-        # Model info row
-        self.model_info_label = tk.Label(
-            section,
-            text="ℹ️  Base model: ~74 MB | Fast | Good accuracy | Good balance for everyday use",
-            font=("Segoe UI", 9),
-            fg=ABB_GRAY,
-            bg="white",
-            anchor="w"
-        )
-        self.model_info_label.pack(fill="x", pady=(5, 0))
-    
-    def _create_file_section(self):
-        """Create the file selection section."""
-        section = tk.LabelFrame(
-            self.root,
-            text=" Step 2: Select Audio/Video File ",
-            font=("Segoe UI", 11, "bold"),
-            fg=ABB_DARK,
-            bg="white",
-            padx=15,
-            pady=10
-        )
-        section.pack(fill="x", padx=20, pady=10)
-        
-        row = tk.Frame(section, bg="white")
-        row.pack(fill="x", pady=5)
-        
-        tk.Label(
-            row,
-            text="File:",
-            font=("Segoe UI", 10),
-            bg="white",
-            width=10,
-            anchor="w"
-        ).pack(side="left")
-        
-        self.file_path = tk.StringVar()
-        self.file_entry = tk.Entry(
-            row,
-            textvariable=self.file_path,
-            font=("Segoe UI", 10),
-            width=50,
-            state="readonly"
-        )
-        self.file_entry.pack(side="left", padx=(0, 10), fill="x", expand=True)
-        
-        self.browse_btn = tk.Button(
-            row,
-            text="📂 Browse...",
-            font=("Segoe UI", 10),
-            bg=ABB_LIGHT_GRAY,
-            fg=ABB_DARK,
-            relief="flat",
-            cursor="hand2",
-            padx=15,
-            pady=5,
-            command=self._browse_file
-        )
-        self.browse_btn.pack(side="left")
-        
-        ToolTip(self.browse_btn, f"Supported formats:\n{', '.join(SUPPORTED_FORMATS)}")
-        
-        # File info row
-        self.file_info_label = tk.Label(
-            section,
-            text="",
-            font=("Segoe UI", 9),
-            fg=ABB_GRAY,
-            bg="white",
-            anchor="w"
-        )
-        self.file_info_label.pack(fill="x", pady=(5, 0))
-    
-    def _create_options_section(self):
-        """Create the options section."""
-        section = tk.LabelFrame(
-            self.root,
-            text=" Step 3: Options (Optional) ",
-            font=("Segoe UI", 11, "bold"),
-            fg=ABB_DARK,
-            bg="white",
-            padx=15,
-            pady=10
-        )
-        section.pack(fill="x", padx=20, pady=10)
-        
-        row = tk.Frame(section, bg="white")
-        row.pack(fill="x", pady=5)
-        
-        # Language selection
-        tk.Label(
-            row,
-            text="Language:",
-            font=("Segoe UI", 10),
-            bg="white",
-            width=10,
-            anchor="w"
-        ).pack(side="left")
-        
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        # Main scroll container
+        outer = tk.Frame(self.root, bg=C_BG)
+        outer.pack(fill="both", expand=True, padx=24, pady=(18, 0))
+
+        self._build_header(outer)
+        self._divider(outer, pady=(12, 0))
+        self._build_settings_strip(outer)
+        self._build_file_zone(outer)
+        self._build_action_row(outer)
+        self._build_transcript(outer)
+        self._build_statusbar()
+
+    def _divider(self, parent, pady=8):
+        tk.Frame(parent, bg=C_BORDER, height=1).pack(fill="x", pady=pady)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+
+    def _build_header(self, parent):
+        row = tk.Frame(parent, bg=C_BG)
+        row.pack(fill="x")
+
+        tk.Label(row, text="Whisper Transcriber",
+                 font=FONT_TITLE, fg=C_TEXT, bg=C_BG, anchor="w").pack(side="left")
+
+        tk.Label(row, text="Local  ·  Private  ·  No cloud",
+                 font=FONT_TINY, fg=C_TERTIARY, bg=C_BG).pack(side="right", anchor="e", pady=(4, 0))
+
+    # ── Settings strip ────────────────────────────────────────────────────────
+
+    def _build_settings_strip(self, parent):
+        strip = tk.Frame(parent, bg=C_BG)
+        strip.pack(fill="x", pady=(14, 0))
+
+        # Model group
+        self._build_model_group(strip)
+        self._gap(strip, 24)
+
+        # Language
+        lang_grp = tk.Frame(strip, bg=C_BG)
+        lang_grp.pack(side="left")
+
+        tk.Label(lang_grp, text="Language", font=FONT_SMALL,
+                 fg=C_SECONDARY, bg=C_BG).pack(anchor="w")
+
         self.lang_var = tk.StringVar(value="Auto-detect")
-        self.lang_dropdown = ttk.Combobox(
-            row,
-            textvariable=self.lang_var,
-            values=list(LANGUAGES.keys()),
-            width=15,
-            state="readonly"
-        )
-        self.lang_dropdown.pack(side="left", padx=(0, 30))
-        
-        ToolTip(self.lang_dropdown, "Select the spoken language in the audio.\n'Auto-detect' works well for most cases.\nManual selection can improve accuracy.")
+        lc = ttk.Combobox(lang_grp, textvariable=self.lang_var,
+                          values=list(LANGUAGES.keys()), width=14, state="readonly")
+        lc.pack(anchor="w", pady=(3, 0))
+        ToolTip(lc, "Auto-detect works well for most audio.\nSet manually for better accuracy.")
 
-        # Output language / translation mode
-        tk.Label(
-            row,
-            text="Output:",
-            font=("Segoe UI", 10),
-            bg="white",
-            width=8,
-            anchor="w"
-        ).pack(side="left")
+        self._gap(strip, 24)
 
-        self.output_lang_var = tk.StringVar(value="Original language (transcribe)")
-        self.output_lang_dropdown = ttk.Combobox(
-            row,
-            textvariable=self.output_lang_var,
-            values=list(OUTPUT_LANGUAGES.keys()),
-            width=28,
-            state="readonly"
-        )
-        self.output_lang_dropdown.pack(side="left", padx=(0, 30))
+        # Output mode
+        out_grp = tk.Frame(strip, bg=C_BG)
+        out_grp.pack(side="left")
 
-        ToolTip(
-            self.output_lang_dropdown,
-            "Choose transcription output mode:\n"
-            "• Original language = normal transcription\n"
-            "• English = Whisper's built-in translation\n\n"
-            "Note: OpenAI Whisper supports direct translation to English only."
-        )
-        
-        # Timestamps checkbox
+        tk.Label(out_grp, text="Output", font=FONT_SMALL,
+                 fg=C_SECONDARY, bg=C_BG).pack(anchor="w")
+
+        self.output_mode_var = tk.StringVar(value="Transcribe (original language)")
+        oc = ttk.Combobox(out_grp, textvariable=self.output_mode_var,
+                          values=list(OUTPUT_MODES.keys()), width=28, state="readonly")
+        oc.pack(anchor="w", pady=(3, 0))
+        ToolTip(oc, "Transcribe keeps the original language.\nTranslate outputs English text.")
+
+        self._gap(strip, 24)
+
+        # Timestamps
+        ts_grp = tk.Frame(strip, bg=C_BG)
+        ts_grp.pack(side="left")
+
+        tk.Label(ts_grp, text="Format", font=FONT_SMALL,
+                 fg=C_SECONDARY, bg=C_BG).pack(anchor="w")
+
         self.timestamps_var = tk.BooleanVar(value=False)
-        self.timestamps_check = tk.Checkbutton(
-            row,
-            text="Include timestamps",
-            variable=self.timestamps_var,
-            font=("Segoe UI", 10),
-            bg="white",
+        ttk.Checkbutton(ts_grp, text="Timestamps",
+                        variable=self.timestamps_var).pack(anchor="w", pady=(5, 0))
+
+    def _build_model_group(self, parent):
+        grp = tk.Frame(parent, bg=C_BG)
+        grp.pack(side="left")
+
+        tk.Label(grp, text="Model", font=FONT_SMALL,
+                 fg=C_SECONDARY, bg=C_BG).pack(anchor="w")
+
+        ctrl_row = tk.Frame(grp, bg=C_BG)
+        ctrl_row.pack(anchor="w", pady=(3, 0))
+
+        self.model_var = tk.StringVar(value="base")
+        self.model_combo = ttk.Combobox(ctrl_row, textvariable=self.model_var,
+                                        values=list(MODEL_INFO.keys()),
+                                        width=9, state="readonly")
+        self.model_combo.pack(side="left")
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_change)
+
+        self.load_btn = FlatButton(ctrl_row, text="Load",
+                                   command=self._load_model,
+                                   primary=True, padx=12, pady=4,
+                                   font=FONT_BTN)
+        self.load_btn.pack(side="left", padx=(6, 0))
+        ToolTip(self.load_btn, "Load model into memory.\nFirst run downloads the model file once.")
+
+        # Status dot + label
+        self._dot = tk.Label(ctrl_row, text="●", font=(UI_FONT, 10),
+                             fg=C_BORDER, bg=C_BG)
+        self._dot.pack(side="left", padx=(10, 0))
+
+        self._model_status = tk.Label(ctrl_row, text="Not loaded",
+                                      font=FONT_SMALL, fg=C_SECONDARY, bg=C_BG)
+        self._model_status.pack(side="left", padx=(3, 0))
+
+        # Descriptor
+        info = MODEL_INFO["base"]
+        self._model_desc = tk.Label(
+            grp,
+            text=f"{info['size']} · {info['speed']} realtime · {info['quality']} — {info['desc']}",
+            font=FONT_TINY, fg=C_TERTIARY, bg=C_BG, anchor="w"
+        )
+        self._model_desc.pack(anchor="w", pady=(3, 0))
+
+    def _gap(self, parent, width=16):
+        tk.Frame(parent, bg=C_BG, width=width).pack(side="left")
+
+    def _on_model_change(self, e=None):
+        name = self.model_var.get()
+        info = MODEL_INFO.get(name, {})
+        self._model_desc.config(
+            text=f"{info['size']} · {info['speed']} realtime · {info['quality']} — {info['desc']}"
+        )
+
+    # ── File zone ─────────────────────────────────────────────────────────────
+
+    def _build_file_zone(self, parent):
+        self._file_zone_outer = tk.Frame(parent, bg=C_BG)
+        self._file_zone_outer.pack(fill="x", pady=(16, 0))
+
+        # Drop target canvas
+        self._drop_canvas = tk.Canvas(
+            self._file_zone_outer,
+            height=76,
+            bg=C_DROP,
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            relief="flat",
             cursor="hand2"
         )
-        self.timestamps_check.pack(side="left")
-        
-        ToolTip(self.timestamps_check, "Add time markers to the transcript.\nUseful for referencing specific parts.")
-    
-    def _create_action_section(self):
-        """Create the main action buttons section."""
-        section = tk.Frame(self.root, bg="white", pady=10)
-        section.pack(fill="x", padx=20)
-        
-        # Transcribe button (large, prominent)
-        self.transcribe_btn = tk.Button(
-            section,
-            text="▶️  TRANSCRIBE",
-            font=("Segoe UI", 14, "bold"),
-            bg=ABB_RED,
-            fg="white",
-            relief="flat",
-            cursor="hand2",
-            padx=40,
-            pady=12,
-            command=self._transcribe
+        self._drop_canvas.pack(fill="x")
+        self._drop_canvas.bind("<Configure>", self._draw_drop_zone)
+        self._drop_canvas.bind("<Button-1>",  lambda e: self._browse_file())
+        self._drop_canvas.bind("<Enter>",     self._drop_hover_on)
+        self._drop_canvas.bind("<Leave>",     self._drop_hover_off)
+
+        # File info strip (shown after a file is selected)
+        self._file_strip = tk.Frame(self._file_zone_outer, bg=C_BG)
+
+        strip_inner = tk.Frame(self._file_strip, bg=C_BG)
+        strip_inner.pack(fill="x", pady=(10, 0))
+
+        self._file_icon_lbl = tk.Label(strip_inner, text="♫",
+                                       font=(UI_FONT, 15), fg=C_ACCENT, bg=C_BG)
+        self._file_icon_lbl.pack(side="left")
+
+        text_col = tk.Frame(strip_inner, bg=C_BG)
+        text_col.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        self._file_name_lbl = tk.Label(text_col, text="",
+                                       font=FONT_UI_MED, fg=C_TEXT, bg=C_BG, anchor="w")
+        self._file_name_lbl.pack(fill="x")
+
+        self._file_meta_lbl = tk.Label(text_col, text="",
+                                       font=FONT_TINY, fg=C_SECONDARY, bg=C_BG, anchor="w")
+        self._file_meta_lbl.pack(fill="x")
+
+        FlatButton(strip_inner, text="Change…",
+                   command=self._browse_file,
+                   padx=10, pady=3, font=FONT_SMALL
+                   ).pack(side="right")
+
+        self.file_path = tk.StringVar()
+
+        # Drag-and-drop (tkinterdnd2 optional)
+        try:
+            self.root.drop_target_register("DND_Files")
+            self.root.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass
+
+    def _draw_drop_zone(self, event=None):
+        c = self._drop_canvas
+        c.delete("all")
+        w, h = c.winfo_width(), c.winfo_height()
+        cx, cy = w // 2, h // 2
+
+        pad = 6
+        c.create_rectangle(pad, pad, w - pad, h - pad,
+                           outline=C_BORDER, dash=(5, 4), width=1)
+
+        c.create_text(cx, cy - 8, text="↓",
+                      font=(UI_FONT, 18), fill=C_TERTIARY, anchor="center")
+        c.create_text(cx, cy + 14, text="Drop a file here, or click to browse",
+                      font=(UI_FONT, 10), fill=C_SECONDARY, anchor="center")
+        c.create_text(cx, cy + 30, text="mp3 · wav · m4a · mp4 · mov · and more",
+                      font=(UI_FONT, 8), fill=C_TERTIARY, anchor="center")
+
+    def _drop_hover_on(self, e=None):
+        self._drop_canvas.configure(bg="#EBF3FB",
+                                    highlightbackground=C_BORDER_FOCUS)
+
+    def _drop_hover_off(self, e=None):
+        self._drop_canvas.configure(bg=C_DROP,
+                                    highlightbackground=C_BORDER)
+
+    def _on_drop(self, event):
+        if self.is_transcribing or self.is_loading_model:
+            self._set_status("Busy — please wait")
+            return
+        try:
+            paths = self.root.tk.splitlist(event.data)
+        except Exception:
+            paths = [event.data]
+        if not paths:
+            return
+        self._set_file(paths[0].strip().strip("{}"))
+
+    def _show_file_strip(self, name, meta):
+        ext = Path(name).suffix.lower()
+        icon = "▶" if ext in (".mp4", ".webm", ".mkv", ".avi", ".mov") else "♫"
+        self._file_icon_lbl.config(text=icon)
+        self._file_name_lbl.config(text=name)
+        self._file_meta_lbl.config(text=meta)
+        self._drop_canvas.pack_forget()
+        self._file_strip.pack(fill="x")
+
+    def _reset_file_zone(self):
+        self._file_strip.pack_forget()
+        self._drop_canvas.config(height=76, bg=C_DROP, highlightbackground=C_BORDER)
+        self._drop_canvas.pack(fill="x")
+
+    # ── Action row ────────────────────────────────────────────────────────────
+
+    def _build_action_row(self, parent):
+        row = tk.Frame(parent, bg=C_BG)
+        row.pack(fill="x", pady=(14, 0))
+
+        self.transcribe_btn = FlatButton(
+            row, text="Transcribe",
+            command=self._transcribe,
+            primary=True, padx=22, pady=7,
+            font=FONT_BTN_PRI
         )
-        self.transcribe_btn.pack(side="left", padx=(0, 15))
-        
-        ToolTip(self.transcribe_btn, "Start transcription.\nMake sure a model is loaded and a file is selected.")
-        
-        # Cancel button (initially hidden)
-        self.cancel_btn = tk.Button(
-            section,
-            text="⏹️ Cancel",
-            font=("Segoe UI", 11),
-            bg=ABB_GRAY,
-            fg="white",
-            relief="flat",
-            cursor="hand2",
-            padx=20,
-            pady=12,
-            command=self._cancel_transcription
+        self.transcribe_btn.pack(side="left")
+        ToolTip(self.transcribe_btn, "Start transcription  Ctrl+Enter")
+
+        self.cancel_btn = FlatButton(
+            row, text="Cancel",
+            command=self._cancel,
+            bg=C_SURFACE, padx=14, pady=7,
+            font=FONT_BTN
         )
-        # Don't pack yet - shown only during transcription
-        
-        # Progress section
-        progress_frame = tk.Frame(section, bg="white")
-        progress_frame.pack(side="left", fill="x", expand=True, padx=10)
-        
+        # hidden until transcribing
+
         self.progress = ttk.Progressbar(
-            progress_frame,
-            mode="indeterminate",
-            length=200
+            row, mode="indeterminate", length=100,
+            style="Thin.Horizontal.TProgressbar"
         )
-        self.progress.pack(fill="x", pady=(0, 5))
-        
-        self.status_var = tk.StringVar(value="Ready to transcribe")
-        self.status_label = tk.Label(
-            progress_frame,
-            textvariable=self.status_var,
-            font=("Segoe UI", 9),
-            fg=ABB_GRAY,
-            bg="white",
-            anchor="w"
-        )
-        self.status_label.pack(fill="x")
-    
-    def _create_output_section(self):
-        """Create the output/transcript section."""
-        section = tk.LabelFrame(
-            self.root,
-            text=" Transcript ",
-            font=("Segoe UI", 11, "bold"),
-            fg=ABB_DARK,
-            bg="white",
-            padx=15,
-            pady=10
-        )
-        section.pack(fill="both", expand=True, padx=20, pady=10)
-        
+        # hidden until transcribing
+
+        self._elapsed_lbl = tk.Label(row, text="", font=FONT_MONO_SM,
+                                     fg=C_SECONDARY, bg=C_BG)
+        # hidden until transcribing
+
+        self._action_info = tk.Label(row, text="", font=FONT_SMALL,
+                                     fg=C_SECONDARY, bg=C_BG)
+        # hidden until transcribing
+
+    # ── Transcript ────────────────────────────────────────────────────────────
+
+    def _build_transcript(self, parent):
         # Toolbar
-        toolbar = tk.Frame(section, bg="white")
-        toolbar.pack(fill="x", pady=(0, 10))
-        
-        self.save_btn = tk.Button(
-            toolbar,
-            text="💾 Save to File",
-            font=("Segoe UI", 10),
-            bg=ABB_LIGHT_GRAY,
-            fg=ABB_DARK,
-            relief="flat",
-            cursor="hand2",
-            padx=10,
-            pady=3,
-            command=self._save_transcript
-        )
-        self.save_btn.pack(side="left", padx=(0, 10))
-        
-        ToolTip(self.save_btn, "Save the transcript as a text file.")
-        
-        self.copy_btn = tk.Button(
-            toolbar,
-            text="📋 Copy All",
-            font=("Segoe UI", 10),
-            bg=ABB_LIGHT_GRAY,
-            fg=ABB_DARK,
-            relief="flat",
-            cursor="hand2",
-            padx=10,
-            pady=3,
-            command=self._copy_transcript
-        )
-        self.copy_btn.pack(side="left", padx=(0, 10))
-        
-        ToolTip(self.copy_btn, "Copy the entire transcript to clipboard.")
-        
-        self.clear_btn = tk.Button(
-            toolbar,
-            text="🗑️ Clear",
-            font=("Segoe UI", 10),
-            bg=ABB_LIGHT_GRAY,
-            fg=ABB_DARK,
-            relief="flat",
-            cursor="hand2",
-            padx=10,
-            pady=3,
-            command=self._clear_output
-        )
-        self.clear_btn.pack(side="left")
-        
-        ToolTip(self.clear_btn, "Clear the transcript output.")
-        
-        # Word count label
-        self.word_count_var = tk.StringVar(value="")
-        self.word_count_label = tk.Label(
-            toolbar,
-            textvariable=self.word_count_var,
-            font=("Segoe UI", 9),
-            fg=ABB_GRAY,
-            bg="white"
-        )
-        self.word_count_label.pack(side="right")
-        
-        # Text output
-        self.output = scrolledtext.ScrolledText(
-            section,
-            font=("Consolas", 11),
+        bar = tk.Frame(parent, bg=C_BG)
+        bar.pack(fill="x", pady=(18, 6))
+
+        tk.Label(bar, text="Transcript", font=FONT_SECTION,
+                 fg=C_TEXT, bg=C_BG).pack(side="left")
+
+        self._word_count = tk.Label(bar, text="", font=FONT_TINY,
+                                    fg=C_TERTIARY, bg=C_BG)
+        self._word_count.pack(side="right")
+
+        FlatButton(bar, text="Clear", command=self._clear_output,
+                   padx=10, pady=3, font=FONT_SMALL
+                   ).pack(side="right", padx=(4, 8))
+        FlatButton(bar, text="Copy", command=self._copy_transcript,
+                   padx=10, pady=3, font=FONT_SMALL
+                   ).pack(side="right", padx=(4, 0))
+        FlatButton(bar, text="Save…", command=self._save_transcript,
+                   padx=10, pady=3, font=FONT_SMALL
+                   ).pack(side="right", padx=(4, 0))
+
+        # Text area with border
+        border = tk.Frame(parent, bg=C_BORDER)
+        border.pack(fill="both", expand=True)
+        inner = tk.Frame(border, bg=C_SURFACE_ALT)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        self.output = tk.Text(
+            inner,
+            font=FONT_MONO,
             wrap=tk.WORD,
-            bg="#FAFAFA",
-            relief="solid",
-            borderwidth=1
+            relief="flat",
+            borderwidth=0,
+            bg=C_SURFACE_ALT,
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            selectbackground=C_ACCENT,
+            selectforeground=C_ACCENT_FG,
+            padx=14,
+            pady=12,
+            spacing2=3,
+            undo=True
         )
-        self.output.pack(fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(inner, orient="vertical", command=self.output.yview)
+        self.output.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.output.pack(side="left", fill="both", expand=True)
         self.output.bind("<<Modified>>", self._on_text_modified)
-    
-    def _create_footer(self):
-        """Create the application footer."""
-        footer = tk.Frame(self.root, bg=ABB_LIGHT_GRAY, height=30)
-        footer.pack(fill="x", side="bottom")
-        
-        tk.Label(
-            footer,
-            text="Local-only processing • OpenAI Whisper (no cloud upload)",
-            font=("Segoe UI", 8),
-            fg=ABB_GRAY,
-            bg=ABB_LIGHT_GRAY
-        ).pack(side="left", padx=10, pady=5)
-        
-        tk.Label(
-            footer,
-            text="v1.0",
-            font=("Segoe UI", 8),
-            fg=ABB_GRAY,
-            bg=ABB_LIGHT_GRAY
-        ).pack(side="right", padx=10, pady=5)
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # EVENT HANDLERS
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def _on_model_selected(self, event=None):
-        """Handle model selection change."""
-        model_name = self.model_var.get()
-        info = MODEL_INFO.get(model_name, {})
-        
-        info_text = f"ℹ️  {model_name.capitalize()} model: {info.get('size', '?')} | {info.get('speed', '?')} | {info.get('accuracy', '?')} accuracy | {info.get('description', '')}"
-        self.model_info_label.config(text=info_text)
-        
-        logger.info(f"Model selected: {model_name}")
-    
-    def _on_text_modified(self, event=None):
-        """Handle text modification in output."""
+
+        self._show_placeholder()
+
+    def _show_placeholder(self):
+        self.output.config(state="normal")
+        self.output.delete("1.0", tk.END)
+        self.output.insert("1.0", "Transcript will appear here…")
+        self.output.config(fg=C_TERTIARY)
+        self._placeholder_active = True
+
+    def _clear_placeholder(self):
+        if getattr(self, '_placeholder_active', False):
+            self.output.config(state="normal")
+            self.output.delete("1.0", tk.END)
+            self.output.config(fg=C_TEXT)
+            self._placeholder_active = False
+
+    # ── Status bar ────────────────────────────────────────────────────────────
+
+    def _build_statusbar(self):
+        tk.Frame(self.root, bg=C_BORDER, height=1).pack(fill="x", side="bottom")
+        bar = tk.Frame(self.root, bg=C_BG)
+        bar.pack(fill="x", side="bottom")
+
+        self._status_var = tk.StringVar(value="Ready")
+        tk.Label(bar, textvariable=self._status_var,
+                 font=FONT_TINY, fg=C_SECONDARY, bg=C_BG, anchor="w"
+                 ).pack(side="left", padx=14, pady=(4, 5))
+
+        tk.Label(bar, text="Local only · No cloud",
+                 font=FONT_TINY, fg=C_TERTIARY, bg=C_BG
+                 ).pack(side="right", padx=14, pady=(4, 5))
+
+    # ── Event handlers ────────────────────────────────────────────────────────
+
+    def _on_text_modified(self, e=None):
         if self.output.edit_modified():
-            text = self.output.get(1.0, tk.END).strip()
-            words = len(text.split()) if text else 0
-            chars = len(text)
-            self.word_count_var.set(f"{words} words | {chars} characters")
+            if not getattr(self, '_placeholder_active', False):
+                text = self.output.get("1.0", tk.END).strip()
+                self._word_count.config(
+                    text=f"{len(text.split()):,} words" if text else ""
+                )
             self.output.edit_modified(False)
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # CORE FUNCTIONALITY
-    # ─────────────────────────────────────────────────────────────────────────
-    
+
+    # ── Load Model ────────────────────────────────────────────────────────────
+
     def _load_model(self):
-        """Load the selected Whisper model."""
         if self.is_loading_model:
-            self._set_status("Model loading already in progress...")
             return
-
         if self.is_transcribing:
-            messagebox.showinfo("Busy", "Please wait for current transcription to finish.")
+            messagebox.showinfo("Busy", "Please wait for transcription to finish.")
             return
 
-        model_name = self.model_var.get()
-        
-        # Check if same model is already loaded
-        if self.model and self.current_model_name == model_name:
-            messagebox.showinfo("Already Loaded", f"The {model_name} model is already loaded and ready.")
+        name = self.model_var.get()
+        if self.model and self.current_model_name == name:
+            self._set_status(f"{name.capitalize()} already loaded")
             return
 
         self.is_loading_model = True
-        
-        def load_task():
+
+        def task():
             try:
-                self._set_loading_state(True, f"Loading {model_name} model...")
-                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#FFA500"))  # Orange - loading
-                self._run_on_ui(lambda: self.model_status_text.config(text=f"Loading {model_name}..."))
-                
-                logger.info(f"Loading model: {model_name}")
-                start_time = time.time()
-                
-                self.model = whisper.load_model(model_name)
-                self.current_model_name = model_name
-                
-                elapsed = time.time() - start_time
-                logger.info(f"Model loaded in {elapsed:.1f}s")
-                
-                # Update UI
-                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#00AA00"))  # Green - loaded
-                self._run_on_ui(lambda: self.model_status_text.config(text=f"{model_name.capitalize()} model ready ✓"))
-                self._set_status(f"Model loaded successfully ({elapsed:.1f}s)")
-                
+                self._set_busy(True, f"Loading {name}…")
+                self._run_on_ui(lambda: self._set_dot(C_WARNING, f"Loading {name}…"))
+                t0 = time.time()
+                self.model = whisper.load_model(name)
+                self.current_model_name = name
+                elapsed = time.time() - t0
+                self._run_on_ui(lambda: self._set_dot(C_SUCCESS, f"{name.capitalize()} ready"))
+                self._set_status(f"{name.capitalize()} loaded ({elapsed:.1f}s)")
             except Exception as e:
-                logger.error(f"Failed to load model: {e}")
-                self._run_on_ui(lambda: self.model_status_indicator.config(fg="#CC0000"))  # Red - error
-                self._run_on_ui(lambda: self.model_status_text.config(text="Failed to load"))
-                self._run_on_ui(lambda: messagebox.showerror("Error", f"Failed to load model:\n\n{str(e)}"))
+                logger.error(f"Load failed: {e}")
+                self._run_on_ui(lambda: self._set_dot(C_DANGER, "Load failed"))
+                self._run_on_ui(lambda: messagebox.showerror("Model Error", f"Could not load model:\n\n{e}"))
                 self._set_status("Error loading model")
             finally:
                 self.is_loading_model = False
-                self._set_loading_state(False)
+                self._set_busy(False)
 
-        try:
-            threading.Thread(target=load_task, daemon=True).start()
-        except Exception as e:
-            self.is_loading_model = False
-            self._set_status("Failed to start model loading")
-            logger.error(f"Could not start model loading thread: {e}")
-            messagebox.showerror("Error", f"Failed to start model loading:\n\n{str(e)}")
-    
+        threading.Thread(target=task, daemon=True).start()
+
+    # ── Browse / Drop ─────────────────────────────────────────────────────────
+
     def _browse_file(self):
-        """Open file browser to select audio/video file."""
         if self.is_transcribing or self.is_loading_model:
-            messagebox.showinfo("Busy", "Please wait for current task to finish.")
             return
-
-        filetypes = [
-            ("Audio/Video files", " ".join(f"*{ext}" for ext in SUPPORTED_FORMATS)),
-            ("Audio files", "*.mp3 *.wav *.m4a *.ogg *.flac"),
-            ("Video files", "*.mp4 *.webm *.mkv *.avi *.mov"),
-            ("All files", "*.*")
-        ]
-        
-        filepath = filedialog.askopenfilename(
-            title="Select Audio or Video File",
-            filetypes=filetypes
-        )
-        
-        if filepath:
-            self._set_file(filepath)
-    
-    def _set_file(self, filepath):
-        """Set the selected file and update UI."""
-        is_valid, message = validate_file(filepath)
-        
-        if not is_valid:
-            messagebox.showerror("Invalid File", message)
-            logger.warning(f"Invalid file selected: {message}")
-            return
-        
-        try:
-            self.file_path.set(filepath)
-
-            # Get file info
-            path = Path(filepath)
-            size_mb = path.stat().st_size / (1024 * 1024)
-            duration = get_file_duration(filepath)
-
-            info_parts = [f"📄 {path.name}", f"Size: {size_mb:.1f} MB"]
-            if duration:
-                info_parts.append(f"Duration: {format_duration(duration)}")
-
-            self.file_info_label.config(text=" | ".join(info_parts))
-            logger.info(f"File selected: {filepath}")
-        except OSError as e:
-            logger.error(f"Could not read file metadata: {e}")
-            self.file_path.set("")
-            self.file_info_label.config(text="")
-            messagebox.showerror("File Error", f"Could not read file metadata:\n\n{e}")
-    
-    def _transcribe(self):
-        """Start the transcription process."""
-        if self.is_transcribing:
-            return
-
-        if self.is_loading_model:
-            messagebox.showinfo("Busy", "Please wait for model loading to finish.")
-            return
-
-        # Validation
-        if not self.model:
-            messagebox.showwarning(
-                "No Model Loaded",
-                "Please load a model first (Step 1).\n\nClick 'Load Model' to continue."
-            )
-            return
-        
-        filepath = self.file_path.get()
-        is_valid, message = validate_file(filepath)
-        
-        if not is_valid:
-            messagebox.showwarning(
-                "No File Selected", 
-                "Please select an audio or video file (Step 2).\n\nClick 'Browse...' to select a file."
-            )
-            return
-        
-        # Get options
-        lang_display = self.lang_var.get()
-        language = LANGUAGES.get(lang_display)
-        if language == "auto":
-            language = None
-
-        output_mode_display = self.output_lang_var.get()
-        output_mode = OUTPUT_LANGUAGES.get(output_mode_display, "source")
-        whisper_task = "translate" if output_mode == "en" else "transcribe"
-        
-        include_timestamps = self.timestamps_var.get()
-        self.is_transcribing = True
-        self.transcription_start_time = time.time()
-        
-        def transcribe_task():
-            try:
-                self._set_loading_state(True, "Transcribing... This may take a while.")
-                
-                # Show cancel button
-                self._run_on_ui(lambda: self.cancel_btn.pack(side="left", padx=(0, 15)))
-                
-                logger.info(
-                    f"Starting transcription: {filepath}, language={language}, "
-                    f"task={whisper_task}, timestamps={include_timestamps}"
-                )
-                
-                # Perform transcription
-                result = self.model.transcribe(
-                    filepath,
-                    language=language,
-                    task=whisper_task,
-                    verbose=False
-                )
-                
-                elapsed = time.time() - self.transcription_start_time
-                
-                if not self.is_transcribing:  # Was cancelled
-                    return
-                
-                # Format output
-                if include_timestamps:
-                    output_text = self._format_with_timestamps(result)
-                else:
-                    output_text = result["text"].strip()
-                
-                # Update UI
-                self._run_on_ui(
-                    lambda: self._display_result(
-                        output_text,
-                        elapsed,
-                        result,
-                        output_mode_display
-                    )
-                )
-                
-                logger.info(f"Transcription completed in {elapsed:.1f}s")
-                
-            except Exception as e:
-                logger.error(f"Transcription failed: {e}")
-                self._run_on_ui(lambda: messagebox.showerror(
-                    "Transcription Failed",
-                    f"An error occurred during transcription:\n\n{str(e)}\n\nPlease check the file and try again."
-                ))
-                self._set_status("Transcription failed")
-            finally:
-                self.is_transcribing = False
-                self._set_loading_state(False)
-                self._run_on_ui(lambda: self.cancel_btn.pack_forget())
-
-        try:
-            threading.Thread(target=transcribe_task, daemon=True).start()
-        except Exception as e:
-            self.is_transcribing = False
-            self._set_status("Failed to start transcription")
-            logger.error(f"Could not start transcription thread: {e}")
-            messagebox.showerror("Transcription Failed", f"Could not start transcription:\n\n{str(e)}")
-    
-    def _format_with_timestamps(self, result):
-        """Format transcription result with timestamps."""
-        lines = []
-        for segment in result.get("segments", []):
-            start = format_duration(segment["start"])
-            end = format_duration(segment["end"])
-            text = segment["text"].strip()
-            lines.append(f"[{start} → {end}]  {text}")
-        return "\n\n".join(lines)
-    
-    def _display_result(self, text, elapsed, result, output_mode_display):
-        """Display the transcription result."""
-        self.output.delete(1.0, tk.END)
-        self.output.insert(tk.END, text)
-        
-        detected_lang = result.get("language", "unknown")
-        mode_label = "Translated to English" if "English" in output_mode_display else "Transcribed"
-        self._set_status(
-            f"✓ {mode_label} in {format_duration(elapsed)} | Detected language: {detected_lang}"
-        )
-    
-    def _cancel_transcription(self):
-        """Cancel the current transcription."""
-        if self.is_transcribing:
-            self.is_transcribing = False
-            self._set_status("Transcription cancelled")
-            logger.info("Transcription cancelled by user")
-    
-    def _save_transcript(self):
-        """Save the transcript to a file."""
-        text = self.output.get(1.0, tk.END).strip()
-        
-        if not text:
-            messagebox.showwarning("Nothing to Save", "The transcript is empty.\n\nTranscribe a file first.")
-            return
-        
-        # Suggest filename based on input file
-        default_name = "transcript.txt"
-        if self.file_path.get():
-            input_name = Path(self.file_path.get()).stem
-            if OUTPUT_LANGUAGES.get(self.output_lang_var.get()) == "en":
-                default_name = f"{input_name}_english_translation.txt"
-            else:
-                default_name = f"{input_name}_transcript.txt"
-        
-        filepath = filedialog.asksaveasfilename(
-            title="Save Transcript",
-            defaultextension=".txt",
-            initialfile=default_name,
+        path = filedialog.askopenfilename(
+            title="Open Audio or Video File",
             filetypes=[
-                ("Text files", "*.txt"),
-                ("All files", "*.*")
+                ("Audio/Video", " ".join(f"*{e}" for e in SUPPORTED_FORMATS)),
+                ("Audio",       "*.mp3 *.wav *.m4a *.ogg *.flac"),
+                ("Video",       "*.mp4 *.webm *.mkv *.avi *.mov"),
+                ("All files",   "*.*"),
             ]
         )
-        
-        if filepath:
-            try:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(text)
-                self._set_status(f"Saved to: {Path(filepath).name}")
-                logger.info(f"Transcript saved to: {filepath}")
-            except Exception as e:
-                logger.error(f"Failed to save transcript: {e}")
-                messagebox.showerror("Save Failed", f"Could not save file:\n\n{str(e)}")
-    
-    def _copy_transcript(self):
-        """Copy transcript to clipboard."""
-        text = self.output.get(1.0, tk.END).strip()
-        
-        if not text:
-            messagebox.showinfo("Nothing to Copy", "The transcript is empty.")
+        if path:
+            self._set_file(path)
+
+    def _set_file(self, filepath):
+        ok, msg = validate_file(filepath)
+        if not ok:
+            messagebox.showerror("Invalid File", msg)
             return
-        
+        try:
+            self.file_path.set(filepath)
+            p = Path(filepath)
+            size = format_file_size(p.stat().st_size)
+            duration = get_file_duration(filepath)
+            self._file_duration = duration
+            meta = "  ·  ".join(filter(None, [
+                p.suffix.upper().lstrip("."),
+                size,
+                format_duration(duration) if duration else None
+            ]))
+            self._show_file_strip(p.name, meta)
+            self._set_status(f"Ready — {p.name}")
+            logger.info(f"File: {filepath}")
+        except OSError as e:
+            messagebox.showerror("File Error", str(e))
+            self.file_path.set("")
+            self._file_duration = None
+
+    # ── Transcribe ────────────────────────────────────────────────────────────
+
+    def _transcribe(self):
+        if self.is_transcribing:
+            return
+        if self.is_loading_model:
+            messagebox.showinfo("Busy", "Model is still loading.")
+            return
+        if not self.model:
+            messagebox.showwarning("No Model", "Load a model first.")
+            return
+
+        filepath = self.file_path.get()
+        ok, _ = validate_file(filepath)
+        if not ok:
+            messagebox.showwarning("No File", "Select an audio or video file first.")
+            return
+
+        language         = LANGUAGES.get(self.lang_var.get())
+        with_timestamps  = self.timestamps_var.get()
+        output_mode_disp = self.output_mode_var.get()
+        whisper_task     = "translate" if OUTPUT_MODES.get(output_mode_disp) == "en" else "transcribe"
+
+        self.is_transcribing = True
+        self._transcription_start = time.time()
+
+        def task():
+            try:
+                self._set_busy(True, "Transcribing…")
+                self._run_on_ui(self._show_transcription_ui)
+                result = self._transcribe_live(filepath, language, whisper_task, with_timestamps)
+                elapsed = time.time() - self._transcription_start
+
+                if not self.is_transcribing:
+                    return
+
+                text = self._format_timestamps(result) if with_timestamps else result["text"].strip()
+                detected = result.get("language", "?")
+                self._run_on_ui(lambda: self._show_result(text, elapsed, detected, output_mode_disp))
+
+            except Exception as e:
+                logger.error(f"Transcription error: {e}")
+                self._run_on_ui(lambda: messagebox.showerror("Transcription Failed", str(e)))
+                self._run_on_ui(lambda: self._set_status("Transcription failed"))
+            finally:
+                self.is_transcribing = False
+                self._run_on_ui(lambda: self._set_busy(False))
+                self._run_on_ui(self._hide_transcription_ui)
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _transcribe_live(self, filepath, language, task_name, with_timestamps):
+        self._run_on_ui(self._prepare_live_output)
+
+        audio = whisper.audio.load_audio(filepath)
+        sr = whisper.audio.SAMPLE_RATE
+        total_s = len(audio) / sr if len(audio) else 0
+        n_chunks = max(1, math.ceil(len(audio) / (sr * 30)))
+
+        segments, chunk_texts, detected_lang = [], [], language
+
+        for i in range(n_chunks):
+            if not self.is_transcribing:
+                break
+
+            s0 = i * sr * 30
+            s1 = min(len(audio), s0 + sr * 30)
+            chunk = audio[s0:s1]
+            if not len(chunk):
+                continue
+
+            res = self.model.transcribe(chunk, language=detected_lang,
+                                        task=task_name, verbose=False)
+            if not detected_lang:
+                detected_lang = res.get("language")
+
+            offset = s0 / sr
+            for seg in res.get("segments", []):
+                adj = dict(seg)
+                adj["start"] = seg["start"] + offset
+                adj["end"]   = seg["end"]   + offset
+                segments.append(adj)
+
+            t = res.get("text", "").strip()
+            if t:
+                chunk_texts.append(t)
+
+            processed = min(s1 / sr, total_s)
+            preview = self._build_preview(chunk_texts, segments, with_timestamps)
+            self._run_on_ui(
+                lambda txt=preview, p=processed, tot=total_s:
+                    self._live_update(txt, p, tot)
+            )
+
+        return {"text": " ".join(chunk_texts).strip(),
+                "segments": segments,
+                "language": detected_lang or "?"}
+
+    def _build_preview(self, chunk_texts, segments, with_timestamps):
+        if with_timestamps:
+            return "\n\n".join(
+                f"[{format_duration(s['start'])} → {format_duration(s['end'])}]  {s['text'].strip()}"
+                for s in segments if s.get("text", "").strip()
+            )
+        return "\n\n".join(chunk_texts)
+
+    def _prepare_live_output(self):
+        self._clear_placeholder()
+        self.output.delete("1.0", tk.END)
+
+    def _live_update(self, text, processed, total):
+        self._clear_placeholder()
+        self.output.delete("1.0", tk.END)
+        if text:
+            self.output.insert("1.0", text)
+            self.output.see(tk.END)
+        self.output.edit_modified(True)
+
+        total_ = total or processed or 1
+        pct = max(0, min(100, int(processed / total_ * 100))) if total_ else 0
+        self.progress.configure(mode="determinate", maximum=100, value=pct)
+        self._action_info.config(
+            text=f"Transcribing  {pct}%  "
+                 f"({format_duration(processed)} / {format_duration(total) if total else '?'})"
+        )
+        self._set_status(
+            f"Transcribing  {pct}%  "
+            f"({format_duration(processed)} / {format_duration(total) if total else '?'})"
+        )
+
+    def _format_timestamps(self, result):
+        return "\n\n".join(
+            f"[{format_duration(s['start'])} → {format_duration(s['end'])}]  {s['text'].strip()}"
+            for s in result.get("segments", [])
+        )
+
+    def _show_result(self, text, elapsed, lang, mode_disp):
+        self._clear_placeholder()
+        self.output.delete("1.0", tk.END)
+        self.output.insert(tk.END, text)
+        label = "Translated" if "Translate" in mode_disp else "Transcribed"
+        self._set_status(f"{label} in {format_duration(elapsed)} · Language: {lang}")
+
+    def _cancel(self):
+        if self.is_transcribing:
+            self.is_transcribing = False
+            self._set_status("Cancelled")
+
+    # ── Transcription UI state ────────────────────────────────────────────────
+
+    def _show_transcription_ui(self):
+        self.cancel_btn.pack(side="left", padx=(8, 0))
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.progress.pack(side="left", padx=(12, 0))
+        self._elapsed_lbl.config(text="00:00")
+        self._elapsed_lbl.pack(side="left", padx=(10, 0))
+        self._action_info.config(text="Preparing…")
+        self._action_info.pack(side="left", padx=(10, 0))
+        self._start_elapsed_timer()
+
+    def _hide_transcription_ui(self):
+        self._stop_elapsed_timer()
+        self.cancel_btn.pack_forget()
+        self.progress.pack_forget()
+        self._elapsed_lbl.pack_forget()
+        self._action_info.pack_forget()
+
+    def _start_elapsed_timer(self):
+        self._stop_elapsed_timer()
+        def tick():
+            if self.is_transcribing and self._transcription_start:
+                self._elapsed_lbl.config(
+                    text=format_clock(time.time() - self._transcription_start)
+                )
+                self._elapsed_timer_id = self.root.after(1000, tick)
+        tick()
+
+    def _stop_elapsed_timer(self):
+        if self._elapsed_timer_id:
+            self.root.after_cancel(self._elapsed_timer_id)
+            self._elapsed_timer_id = None
+
+    # ── Transcript actions ────────────────────────────────────────────────────
+
+    def _save_transcript(self):
+        text = self._transcript_text()
+        if not text:
+            messagebox.showwarning("Nothing to Save", "Transcript is empty.")
+            return
+        default = "transcript.txt"
+        if self.file_path.get():
+            stem = Path(self.file_path.get()).stem
+            suffix = "_english_translation" if OUTPUT_MODES.get(self.output_mode_var.get()) == "en" else "_transcript"
+            default = stem + suffix + ".txt"
+        dest = filedialog.asksaveasfilename(
+            title="Save Transcript", defaultextension=".txt",
+            initialfile=default,
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if dest:
+            try:
+                Path(dest).write_text(text, encoding="utf-8")
+                self._set_status(f"Saved: {Path(dest).name}")
+            except Exception as e:
+                messagebox.showerror("Save Failed", str(e))
+
+    def _copy_transcript(self):
+        text = self._transcript_text()
+        if not text:
+            return
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self._set_status("Copied to clipboard ✓")
-    
+        self._set_status("Copied to clipboard")
+
     def _clear_output(self):
-        """Clear the transcript output."""
-        if self.output.get(1.0, tk.END).strip():
-            if messagebox.askyesno("Clear Transcript", "Are you sure you want to clear the transcript?"):
-                self.output.delete(1.0, tk.END)
-                self.word_count_var.set("")
-                self._set_status("Output cleared")
-    
-    def _show_help(self):
-        """Show help dialog."""
-        help_text = """
-WHISPER TRANSCRIBER - QUICK GUIDE
-═══════════════════════════════════════
+        if not self._transcript_text():
+            return
+        self._show_placeholder()
+        self._word_count.config(text="")
+        self._set_status("Cleared")
 
-HOW TO USE:
-1️⃣  Select a model and click "Load Model"
-    • Start with "base" for a good balance
-    • Use "tiny" for quick drafts
-    • Use "small" or "medium" for important work
+    def _transcript_text(self):
+        if getattr(self, '_placeholder_active', False):
+            return ""
+        return self.output.get("1.0", tk.END).strip()
 
-2️⃣  Click "Browse" to select your audio/video file
-    • Supported: MP3, WAV, M4A, MP4, and more
+    # ── UI helpers ────────────────────────────────────────────────────────────
 
-3️⃣  (Optional) Set language if auto-detect fails
-
-4️⃣  Choose output mode:
-    • Original language (transcribe)
-    • English (translate)
-
-5️⃣  Click "TRANSCRIBE" and wait
-
-6️⃣  Save or copy your transcript
-
-TIPS:
-• First model load downloads files (one-time)
-• Internet is only needed for first model download (unless models are already cached)
-• Longer files take more time
-• Clear audio = better results
-• Manually selecting language can improve accuracy
-• Whisper can directly translate speech to English
-• For non-English output translation, use another translation tool after transcription
-
-
-PRIVACY & TRANSPARENCY:
-• Transcription runs locally on this computer
-• Audio/video is NOT sent to the OpenAI API by this app
-• No account login is required for local transcription
-
-
-TROUBLESHOOTING:
-• "File not found" → Check file path has no special characters
-• Slow transcription → Use a smaller model (tiny/base)
-• Poor accuracy → Try a larger model or set language manually
-        """
-        
-        help_window = tk.Toplevel(self.root)
-        help_window.title("Help")
-        help_window.geometry("500x550")
-        help_window.configure(bg="white")
-        
-        text_widget = scrolledtext.ScrolledText(
-            help_window,
-            font=("Consolas", 10),
-            wrap=tk.WORD,
-            bg="white",
-            relief="flat"
-        )
-        text_widget.pack(fill="both", expand=True, padx=20, pady=20)
-        text_widget.insert(tk.END, help_text)
-        text_widget.config(state="disabled")
-        
-        close_btn = tk.Button(
-            help_window,
-            text="Close",
-            command=help_window.destroy,
-            bg=ABB_RED,
-            fg="white",
-            font=("Segoe UI", 10),
-            relief="flat",
-            padx=20,
-            pady=5
-        )
-        close_btn.pack(pady=(0, 20))
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # UI HELPER METHODS
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def _set_loading_state(self, is_loading, message=None):
-        """Set UI to loading/ready state."""
+    def _set_busy(self, busy, msg=None):
         def apply():
-            if is_loading:
-                self.progress.start(10)
-                self.transcribe_btn.config(state="disabled", bg=ABB_GRAY)
-                self.load_btn.config(state="disabled")
-                self.browse_btn.config(state="disabled")
+            if busy:
+                self.transcribe_btn.set_disabled(True)
+                self.load_btn.set_disabled(True)
             else:
-                self.progress.stop()
-                self.transcribe_btn.config(state="normal", bg=ABB_RED)
-                self.load_btn.config(state="normal")
-                self.browse_btn.config(state="normal")
+                self.progress.configure(mode="determinate", maximum=100, value=0)
+                self.transcribe_btn.set_disabled(False)
+                self.load_btn.set_disabled(False)
+        self._run_on_ui(apply)
+        if msg:
+            self._set_status(msg)
 
-        self._run_on_ui(apply)
-        if message:
-            self._set_status(message)
-    
-    def _set_status(self, message):
-        """Update status message."""
+    def _set_status(self, msg):
         def apply():
-            if hasattr(self, "status_var"):
-                self.status_var.set(message)
+            if hasattr(self, "_status_var"):
+                self._status_var.set(msg)
         self._run_on_ui(apply)
-        logger.info(f"Status: {message}")
+        logger.info(f"Status: {msg}")
+
+    def _set_dot(self, color, text):
+        def apply():
+            if hasattr(self, "_dot"):
+                self._dot.config(fg=color)
+                self._model_status.config(text=text)
+        self._run_on_ui(apply)
 
     def _run_on_ui(self, callback):
-        """Run callback on Tk main thread safely."""
         try:
             if self._is_closing:
                 return
@@ -1296,30 +1119,24 @@ TROUBLESHOOTING:
             pass
 
     def _on_close(self):
-        """Handle app close safely during active background operations."""
         self._is_closing = True
-        self.is_loading_model = False
         self.is_transcribing = False
+        self.is_loading_model = False
+        self._stop_elapsed_timer()
         try:
             self.root.destroy()
         except tk.TclError:
             pass
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
 
 def main():
-    """Main entry point."""
-    logger.info("=" * 60)
-    logger.info("Starting Whisper Transcriber")
-    logger.info("=" * 60)
-    
+    logger.info("Starting Whisper Transcriber (Windows)")
     root = tk.Tk()
-    app = WhisperTranscriber(root)
+    WhisperTranscriber(root)
     root.mainloop()
-    
-    logger.info("Application closed")
+    logger.info("Closed")
 
 if __name__ == "__main__":
     main()
