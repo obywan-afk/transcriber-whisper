@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -70,12 +70,13 @@ jobs:
 
           cat notary-submit.json
 
-          SUBMISSION_ID=$(python3 - <<EOF
+          SUBMISSION_ID=$(python3 - <<'EOF'
 import json
-print(json.load(open("notary-submit.json"))["id"])
+with open("notary-submit.json", "r", encoding="utf-8") as f:
+    print(json.load(f)["id"])
 EOF
 )
-          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+          echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
 
       - name: Wait for notarization (retry-safe)
         env:
@@ -92,9 +93,10 @@ EOF
               --issuer "$API_ISSUER_ID" \
               --output-format json > notary-info.json; then
 
-              STATUS=$(python3 - <<EOF
+              STATUS=$(python3 - <<'EOF'
 import json
-print(json.load(open("notary-info.json"))["status"])
+with open("notary-info.json", "r", encoding="utf-8") as f:
+    print(json.load(f)["status"])
 EOF
 )
 
