@@ -56,7 +56,8 @@ jobs:
         run: |
           echo "$API_KEY_BASE64" | base64 --decode > AuthKey.p8
 
-      - name: Notarize zip
+      - name: Submit for notarization
+        id: notarize_submit
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -65,7 +66,62 @@ jobs:
             --key "AuthKey.p8" \
             --key-id "$API_KEY_ID" \
             --issuer "$API_ISSUER_ID" \
-            --wait
+            --output-format json > notary-submit.json
+
+          cat notary-submit.json
+
+          SUBMISSION_ID=$(python3 - <<EOF
+import json
+print(json.load(open("notary-submit.json"))["id"])
+EOF
+)
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for notarization (retry-safe)
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          SUBMISSION_ID: ${{ steps.notarize_submit.outputs.submission_id }}
+        run: |
+          for i in {1..30}; do
+            echo "Check $i..."
+
+            if xcrun notarytool info "$SUBMISSION_ID" \
+              --key "AuthKey.p8" \
+              --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID" \
+              --output-format json > notary-info.json; then
+
+              STATUS=$(python3 - <<EOF
+import json
+print(json.load(open("notary-info.json"))["status"])
+EOF
+)
+
+              echo "Status: $STATUS"
+
+              if [ "$STATUS" = "Accepted" ]; then
+                echo "Notarization success"
+                exit 0
+              fi
+
+              if [ "$STATUS" = "Invalid" ] || [ "$STATUS" = "Rejected" ]; then
+                echo "Notarization failed"
+                xcrun notarytool log "$SUBMISSION_ID" \
+                  --key "AuthKey.p8" \
+                  --key-id "$API_KEY_ID" \
+                  --issuer "$API_ISSUER_ID"
+                exit 1
+              fi
+            else
+              echo "Network issue, retrying..."
+            fi
+
+            sleep 20
+          done
+
+          echo "Timeout waiting for notarization"
+          exit 1
 
       - name: Staple app
         run: |
