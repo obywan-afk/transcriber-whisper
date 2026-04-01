@@ -79,7 +79,7 @@ jobs:
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           SUBMISSION_ID: ${{ steps.notarize_submit.outputs.submission_id }}
         run: |
-          for i in {1..30}; do
+          for i in {1..90}; do
             echo "Check $i..."
 
             if xcrun notarytool info "$SUBMISSION_ID" \
