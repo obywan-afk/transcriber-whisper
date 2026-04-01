@@ -5,13 +5,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-mac-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-mac:
     runs-on: macos-latest
+    timeout-minutes: 120
     env:
       APP_NAME: WhisperTranscriber
       APP_PATH: dist/WhisperTranscriber.app
-      ZIP_PATH: dist/WhisperTranscriber-mac.zip
       DMG_PATH: dist/WhisperTranscriber-mac.dmg
       KEYCHAIN_PATH: build/app-signing.keychain-db
       CERT_PATH: build/certificate.p12
@@ -28,15 +32,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyinstaller openai-whisper imageio-ffmpeg
-
-      - name: Build Mac App
-        run: |
-          pyinstaller --noconfirm --windowed --name "$APP_NAME" \
-            --icon assets/icon.icns \
-            --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
-            --collect-all whisper \
-            --collect-all imageio_ffmpeg \
-            transcriber_mac.py
 
       - name: Prepare signing assets
         env:
@@ -60,54 +55,21 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F "$SIGNING_IDENTITY"
 
-      - name: Sign app bundle
+      - name: Build signed Mac App
         env:
           SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          codesign --force --deep --options runtime --timestamp \
-            --sign "$SIGNING_IDENTITY" \
-            "$APP_PATH"
+          pyinstaller --noconfirm --windowed --name "$APP_NAME" \
+            --icon assets/icon.icns \
+            --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
+            --codesign-identity "$SIGNING_IDENTITY" \
+            --collect-all whisper \
+            --collect-all imageio_ffmpeg \
+            transcriber_mac.py
 
+      - name: Verify app signature
+        run: |
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-
-      - name: Archive app bundle
-        run: |
-          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
-
-      - name: Notarize app zip
-        env:
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-        run: |
-          for i in 1 2 3; do
-            echo "Notarization attempt $i for $ZIP_PATH..."
-
-            if xcrun notarytool submit "$ZIP_PATH" \
-              --key "$API_KEY_PATH" \
-              --key-id "$API_KEY_ID" \
-              --issuer "$API_ISSUER_ID" \
-              --wait; then
-              echo "Zip notarization succeeded"
-              exit 0
-            fi
-
-            if [ "$i" -lt 3 ]; then
-              echo "Retrying in 30 seconds..."
-              sleep 30
-            fi
-          done
-
-          echo "Zip notarization failed after retries"
-          exit 1
-
-      - name: Staple app bundle
-        run: |
-          xcrun stapler staple "$APP_PATH"
-          xcrun stapler validate "$APP_PATH"
-
-      - name: Re-zip stapled app
-        run: |
-          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
       - name: Create DMG
         run: |
@@ -161,12 +123,6 @@ jobs:
         run: |
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
-
-      - name: Upload zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: WhisperTranscriber-Mac-Zip
-          path: ${{ env.ZIP_PATH }}
 
       - name: Upload dmg artifact
         uses: actions/upload-artifact@v4
