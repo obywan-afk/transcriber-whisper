@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: build-mac-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-mac:
@@ -98,16 +98,41 @@ jobs:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
+          submission_id=""
+
           for i in 1 2 3; do
             echo "Notarization attempt $i for $DMG_PATH..."
 
-            if xcrun notarytool submit "$DMG_PATH" \
+            set +e
+            output=$(xcrun notarytool submit "$DMG_PATH" \
               --key "$API_KEY_PATH" \
               --key-id "$API_KEY_ID" \
               --issuer "$API_ISSUER_ID" \
-              --wait; then
+              --wait 2>&1)
+            rc=$?
+            set -e
+
+            printf '%s\n' "$output"
+
+            if [ -z "$submission_id" ]; then
+              submission_id=$(printf '%s\n' "$output" | awk '/id:/ {print $2; exit}')
+            fi
+
+            if [ -n "$submission_id" ]; then
+              echo "Submission ID: $submission_id"
+            fi
+
+            if [ "$rc" -eq 0 ]; then
               echo "DMG notarization succeeded"
               exit 0
+            fi
+
+            if [ -n "$submission_id" ]; then
+              echo "Fetching notarization log for $submission_id..."
+              xcrun notarytool log "$submission_id" \
+                --key "$API_KEY_PATH" \
+                --key-id "$API_KEY_ID" \
+                --issuer "$API_ISSUER_ID" || true
             fi
 
             if [ "$i" -lt 3 ]; then
