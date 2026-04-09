@@ -17,6 +17,7 @@ jobs:
       APP_NAME: WhisperTranscriber
       APP_PATH: dist/WhisperTranscriber.app
       DMG_PATH: dist/WhisperTranscriber-mac.dmg
+      ENTITLEMENTS_PATH: entitlements.mac.plist
       KEYCHAIN_PATH: build/app-signing.keychain-db
       CERT_PATH: build/certificate.p12
       API_KEY_PATH: build/AuthKey.p8
@@ -63,6 +64,7 @@ jobs:
             --icon assets/icon.icns \
             --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
             --codesign-identity "$SIGNING_IDENTITY" \
+            --osx-entitlements-file "$ENTITLEMENTS_PATH" \
             --collect-all whisper \
             --collect-all imageio_ffmpeg \
             transcriber_mac.py
@@ -70,6 +72,7 @@ jobs:
       - name: Verify app signature
         run: |
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH"
 
       - name: Create DMG
         run: |
