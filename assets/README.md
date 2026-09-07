@@ -1,31 +1,39 @@
 # Icon assets
 
-This folder contains icon source files for Whisper Transcriber.
+Icon source and exported files for Whisper Transcriber.
 
-## Source
+| File | Purpose |
+|---|---|
+| `icon.svg` | Editable vector master — edit this one |
+| `icon.icns` | macOS app and DMG volume icon |
+| `icon.ico` | Windows executable icon |
+| `icon.iconset/` | Intermediate PNGs used to build `icon.icns` |
+| `icon-512.png` | Raster copy used as the README hero image |
 
-- `icon.svg` — editable vector master icon
+## Regenerating
 
-## Recommended export pipeline
+Export the master to a 1024×1024 PNG first:
 
-1. Export `icon.svg` to `icon-1024.png`
-2. Generate macOS `.icns`
-3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Wi3. Generate Winset/icon_512x512.png
-cp icon-1024.png  icon.iconset/icon_512x512@2x.png
-iconutil -c icns icon.iconset
-mv icon.icns ../icon.icns
+```bash
+# with rsvg-convert (brew install librsvg)
+rsvg-convert -w 1024 -h 1024 icon.svg -o icon-1024.png
 ```
 
----
+### macOS `.icns`
 
-## Windows `.ico` generation (ImageMagick)
+```bash
+mkdir -p icon.iconset
+for s in 16 32 128 256 512; do
+  sips -z $s $s      icon-1024.png --out "icon.iconset/icon_${s}x${s}.png"
+  sips -z $((s*2)) $((s*2)) icon-1024.png --out "icon.iconset/icon_${s}x${s}@2x.png"
+done
+iconutil -c icns icon.iconset -o icon.icns
+```
+
+### Windows `.ico`
 
 ```bash
 magick icon-1024.png -define icon:auto-resize=16,24,32,48,64,128,256 icon.ico
 ```
 
-If `magick` is missing on macOS:
-
-```bash
-brew install imagemagick
-```
+`magick` comes from ImageMagick — `brew install imagemagick` on macOS.

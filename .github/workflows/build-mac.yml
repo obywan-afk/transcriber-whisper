@@ -306,38 +306,43 @@ jobs:
             gatekeeper=$'This build is **not notarized**, so Gatekeeper blocks it on first launch.\n\nAfter dragging the app to Applications, right-click it and choose **Open**, then confirm. You only need to do this once.\n\nAlternatively, run:\n\n```bash\nxattr -dr com.apple.quarantine /Applications/WhisperTranscriber.app\n```'
           fi
 
-          notes=$(printf '%s\n' \
-            "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')." \
-            "" \
-            "## Install" \
-            "" \
-            "$gatekeeper" \
-            "" \
-            "## Details" \
-            "" \
-            "- Build status: ${DMG_STATUS}" \
-            "- Requires macOS on **Apple Silicon** (arm64)" \
-            "- Whisper models download on first use and are cached locally" \
-            "- SHA-256: \`${DMG_SHA256}\`")
+          if [ "$tag" = "latest-mac" ]; then
+            notes=$(printf '%s\n' \
+              "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')." \
+              "" \
+              "## Install" \
+              "" \
+              "$gatekeeper" \
+              "" \
+              "## Details" \
+              "" \
+              "- Build status: ${DMG_STATUS}" \
+              "- Requires macOS on **Apple Silicon** (arm64)" \
+              "- Whisper models download on first use and are cached locally" \
+              "- SHA-256: \`${DMG_SHA256}\`")
+          else
+            notes="Downloads for macOS and Windows are attached below. See the [README](https://github.com/${GITHUB_REPOSITORY}#download) for install steps."
+          fi
 
-          if gh release view "$tag" >/dev/null 2>&1; then
+          # A v* tag runs this workflow and the Windows one at the same time, so the
+          # release may appear between the check and the create. Tolerate that and
+          # let the upload be the step that matters.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release create "$tag" \
+              --title "$title" \
+              --notes "$notes" \
+              --target "$GITHUB_SHA" \
+              $prerelease || echo "Release already created by a concurrent job."
+          elif [ "$tag" = "latest-mac" ]; then
             # gh release edit --target cannot move a tag that already exists,
             # so repoint the rolling tag at this commit directly.
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null \
               || echo "::warning::Could not repoint tag $tag at $GITHUB_SHA"
-
-            gh release edit "$tag" \
-              --title "$title" \
-              --notes "$notes"
-            gh release upload "$tag" "$DMG_PATH" --clobber
-          else
-            # shellcheck disable=SC2086
-            gh release create "$tag" "$DMG_PATH" \
-              --title "$title" \
-              --notes "$notes" \
-              --target "$GITHUB_SHA" \
-              $prerelease
+            gh release edit "$tag" --title "$title" --notes "$notes"
           fi
+
+          gh release upload "$tag" "$DMG_PATH" --clobber
 
           echo "Download: $(gh release view "$tag" --json url --jq .url)"
