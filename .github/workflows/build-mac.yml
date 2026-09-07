@@ -29,14 +29,14 @@ jobs:
             arch: arm64
             requires: Apple Silicon (M1 or newer)
             pins: ""
-          # torch 2.2.2 is the last release with macOS x86_64 wheels, and it
-          # predates the numpy 2 ABI. Everything else in the stack still
-          # resolves from those two pins.
+          # Intel macOS wheels have been dropped across this stack at different
+          # points: torch after 2.2.2, llvmlite after 0.45.1, numba after 0.62.1.
+          # torch 2.2.2 also predates the numpy 2 ABI, hence numpy<2.
           - label: intel
             runner: macos-15-intel
             arch: x86_64
             requires: Intel Mac
-            pins: "torch==2.2.2 numpy<2"
+            pins: "torch==2.2.2 numpy<2 numba==0.62.1 llvmlite==0.45.1"
 
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
@@ -63,7 +63,13 @@ jobs:
           EXTRA_PINS: ${{ matrix.pins }}
         run: |
           python -c "import platform; print('Runner arch:', platform.machine())"
-          pip install pyinstaller openai-whisper imageio-ffmpeg $EXTRA_PINS
+
+          # Refuse source builds for the compiled dependencies. Left to itself
+          # pip picks the newest llvmlite, finds no Intel macOS wheel, and tries
+          # to compile it against an LLVM the runner does not have. Failing on a
+          # missing wheel is far easier to diagnose than a CMake error.
+          pip install --only-binary=torch,numpy,numba,llvmlite,tiktoken \
+            pyinstaller openai-whisper imageio-ffmpeg $EXTRA_PINS
           pip list | grep -Ei "^(torch|numpy|numba|llvmlite|openai-whisper) "
           brew install create-dmg
 
@@ -329,6 +335,8 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks out the repo, so gh cannot infer it from git.
+          GH_REPO: ${{ github.repository }}
         run: |
           cd incoming
           ls -la
