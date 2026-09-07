@@ -1,0 +1,137 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      APP_NAME: WhisperTranscriber
+      DIST_DIR: dist/WhisperTranscriber
+      ZIP_PATH: dist/WhisperTranscriber-windows.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyinstaller openai-whisper imageio-ffmpeg
+
+      # One-dir, not one-file: bundling torch into a single executable produces a
+      # ~2 GB binary that re-extracts itself on every launch. The folder build
+      # starts immediately and zips to roughly the same download size.
+      - name: Build Windows app
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --windowed --name "$APP_NAME" \
+            --icon assets/icon.ico \
+            --collect-all whisper \
+            --collect-all imageio_ffmpeg \
+            transcriber_windows.py
+
+          test -f "$DIST_DIR/$APP_NAME.exe"
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "$env:DIST_DIR\*" -DestinationPath "$env:ZIP_PATH" -CompressionLevel Optimal
+          Get-Item "$env:ZIP_PATH" | Select-Object Name, Length
+
+      - name: Summarize build
+        id: zip
+        shell: bash
+        run: |
+          sha=$(sha256sum "$ZIP_PATH" | cut -d' ' -f1)
+          size=$(du -h "$ZIP_PATH" | cut -f1)
+
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## WhisperTranscriber-windows.zip"
+            echo
+            echo "- Size: $size"
+            echo "- Architecture: x64"
+            echo "- Code signing: unsigned (SmartScreen prompt on first launch)"
+            echo "- SHA-256: \`$sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload zip artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhisperTranscriber-Windows
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP_SHA256: ${{ steps.zip.outputs.sha256 }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            title="WhisperTranscriber ${GITHUB_REF_NAME}"
+            prerelease=""
+            notes="Downloads for macOS and Windows are attached below. See the [README](https://github.com/${GITHUB_REPOSITORY}#download) for install steps."
+          else
+            tag="latest-windows"
+            title="WhisperTranscriber — latest Windows build"
+            prerelease="--prerelease"
+            notes=$(printf '%s\n' \
+              "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')." \
+              "" \
+              "## Install" \
+              "" \
+              "Unzip anywhere and run \`WhisperTranscriber.exe\`." \
+              "" \
+              "The build is unsigned, so Windows SmartScreen shows a warning on first" \
+              "launch. Click **More info**, then **Run anyway**. You only need to do this once." \
+              "" \
+              "## Details" \
+              "" \
+              "- Requires 64-bit Windows 10 or later" \
+              "- Whisper models download on first use and are cached locally" \
+              "- SHA-256: \`${ZIP_SHA256}\`")
+          fi
+
+          # A v* tag runs this workflow and the macOS one at the same time, so the
+          # release may appear between the check and the create. Tolerate that and
+          # let the upload be the step that matters.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release create "$tag" \
+              --title "$title" \
+              --notes "$notes" \
+              --target "$GITHUB_SHA" \
+              $prerelease || echo "Release already created by a concurrent job."
+          elif [ "$tag" = "latest-windows" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null \
+              || echo "::warning::Could not repoint tag $tag at $GITHUB_SHA"
+            gh release edit "$tag" --title "$title" --notes "$notes"
+          fi
+
+          gh release upload "$tag" "$ZIP_PATH" --clobber
+
+          echo "Download: $(gh release view "$tag" --json url --jq .url)"

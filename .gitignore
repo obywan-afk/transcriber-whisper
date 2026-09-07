@@ -24,3 +24,9 @@ Thumbs.db
 # Whisper / cache (optional)
 .whisper/
 icon.iconset/
+
+.env
+
+# Packaged build output left in the repo root
+WhisperTranscriber-*.zip
+WhisperTranscriber-*.dmg
