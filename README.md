@@ -9,8 +9,9 @@
 A small, native-feeling desktop app for [OpenAI Whisper](https://github.com/openai/whisper).
 No account, no API key, no upload. Your media never leaves the device.
 
-[![Download for macOS](https://img.shields.io/badge/Download-macOS%20(Apple%20Silicon)-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac.dmg)
-[![Download for Windows](https://img.shields.io/badge/Download-Windows%20x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-windows/WhisperTranscriber-windows.zip)
+[![Download for Apple Silicon](https://img.shields.io/badge/Mac-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac-apple-silicon.dmg)
+[![Download for Intel Mac](https://img.shields.io/badge/Mac-Intel-555555?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac-intel.dmg)
+[![Download for Windows](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-windows/WhisperTranscriber-windows.zip)
 
 [![Build Mac App](https://github.com/obywan-afk/transcriber-whisper/actions/workflows/build-mac.yml/badge.svg)](https://github.com/obywan-afk/transcriber-whisper/actions/workflows/build-mac.yml)
 [![Build Windows App](https://github.com/obywan-afk/transcriber-whisper/actions/workflows/build-windows.yml/badge.svg)](https://github.com/obywan-afk/transcriber-whisper/actions/workflows/build-windows.yml)
@@ -42,16 +43,19 @@ Models are fetched once on first use and cached in your home directory.
 
 ## Download
 
-| Platform | File | Requirements |
+| Platform | File | For |
 |---|---|---|
-| **macOS** | **[WhisperTranscriber-mac.dmg](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac.dmg)** | Apple Silicon (M1 or newer) |
+| **macOS** | **[WhisperTranscriber-mac-apple-silicon.dmg](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac-apple-silicon.dmg)** | M1 or newer |
+| **macOS** | **[WhisperTranscriber-mac-intel.dmg](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac-intel.dmg)** | Intel Macs |
 | **Windows** | **[WhisperTranscriber-windows.zip](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-windows/WhisperTranscriber-windows.zip)** | 64-bit Windows 10 or later |
 
-Both links always point at the newest build. Every release lists a SHA-256
+These links always point at the newest build. Every release lists a SHA-256
 checksum, and older builds live on the [releases page](https://github.com/obywan-afk/transcriber-whisper/releases).
 
-> **Intel Macs are not supported.** The macOS build is arm64-only. On an Intel
-> Mac, [run from source](#run-from-source) instead.
+> **Which Mac do I have?** Apple menu → **About This Mac**. A **Chip** line
+> starting with *Apple* means Apple Silicon. A **Processor** line naming *Intel*
+> means Intel. Downloading the wrong one gives you *"not supported on this
+> Mac"* — the two builds are not interchangeable.
 
 ### Installing on macOS
 
@@ -122,7 +126,7 @@ Deleting the model cache is safe — models re-download on next use.
 
 ## Run from source
 
-Works anywhere Python does, Intel Macs and Linux included.
+Works anywhere Python does, Linux included.
 
 ```bash
 git clone https://github.com/obywan-afk/transcriber-whisper.git
@@ -197,12 +201,15 @@ The build is not notarized. Right-click the app in Applications and choose
 </details>
 
 <details>
-<summary><b>macOS: the app bounces once and quits</b></summary>
+<summary><b>macOS: "not supported on this Mac"</b></summary>
 
-Usually an Intel Mac running the arm64 build. Confirm with:
+Wrong architecture — an Apple Silicon build on an Intel Mac or the reverse.
+Rosetta cannot help here; it translates Intel code to run on Apple Silicon, not
+the other way round. Check which you need:
 
 ```bash
-uname -m   # arm64 = supported, x86_64 = run from source instead
+uname -m   # arm64  -> WhisperTranscriber-mac-apple-silicon.dmg
+           # x86_64 -> WhisperTranscriber-mac-intel.dmg
 ```
 
 </details>
