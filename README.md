@@ -14,6 +14,27 @@ interfaces and keeps media on the device.
 Models download on first use and are then cached locally. The app does not send
 media to the OpenAI API or another cloud service.
 
+## Download
+
+Latest macOS build (Apple Silicon):
+
+**[WhisperTranscriber-mac.dmg](https://github.com/obywan-afk/transcriber-whisper/releases/download/latest-mac/WhisperTranscriber-mac.dmg)**
+
+Open the DMG and drag the app to Applications.
+
+If macOS says the app "cannot be opened", the build was not notarized. Right-click
+the app in Applications, choose **Open**, and confirm. You only need to do this
+once. The equivalent from a terminal is:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/WhisperTranscriber.app
+```
+
+Every build is also attached to the [releases page](https://github.com/obywan-afk/transcriber-whisper/releases),
+with a SHA-256 checksum in the release notes.
+
+There is no Windows build yet — see [Run from source](#run-from-source) below.
+
 ## Run from source
 
 Install the dependencies:
@@ -49,8 +70,13 @@ pyinstaller --noconfirm --windowed --name WhisperTranscriber \
   --icon assets/icon.ico transcriber_windows.py
 ```
 
-The builds are written to `dist/`. There are no maintained downloadable binaries
-yet, so please build from source for now.
+The builds are written to `dist/`.
+
+The macOS app is built automatically by
+[`.github/workflows/build-mac.yml`](.github/workflows/build-mac.yml) on every push
+to `main`, which signs it, notarizes it when the Apple Developer credentials allow,
+and publishes the DMG to the `latest-mac` release. Pushing a `v*` tag publishes a
+numbered release with the same DMG attached.
 
 ## Files
 

@@ -3,10 +3,16 @@ name: Build Mac App
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-mac-${{ github.ref }}
@@ -15,7 +21,7 @@ concurrency:
 jobs:
   build-mac:
     runs-on: macos-latest
-    timeout-minutes: 360
+    timeout-minutes: 90
     env:
       APP_NAME: WhisperTranscriber
       APP_PATH: dist/WhisperTranscriber.app
@@ -38,7 +44,35 @@ jobs:
           pip install pyinstaller openai-whisper imageio-ffmpeg
           brew install create-dmg
 
+      # Signing and notarization depend on Apple Developer secrets that can
+      # expire independently of this repo. Detect what is usable up front so a
+      # missing or broken credential downgrades the build instead of killing it.
+      - name: Detect signing capability
+        id: caps
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          can_sign=false
+          if [ -n "$CERTIFICATE_P12_BASE64" ] && [ -n "$CERTIFICATE_PASSWORD" ] && [ -n "$SIGNING_IDENTITY" ]; then
+            can_sign=true
+          fi
+
+          can_notarize=false
+          if [ "$can_sign" = true ] && [ -n "$API_KEY_P8_BASE64" ] && [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER_ID" ]; then
+            can_notarize=true
+          fi
+
+          echo "can_sign=$can_sign" >> "$GITHUB_OUTPUT"
+          echo "can_notarize=$can_notarize" >> "$GITHUB_OUTPUT"
+          echo "Signing: $can_sign / notarization: $can_notarize"
+
       - name: Prepare signing assets
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -47,7 +81,9 @@ jobs:
         run: |
           mkdir -p build
           printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
-          printf '%s' "$API_KEY_P8_BASE64" | base64 --decode > "$API_KEY_PATH"
+          if [ -n "$API_KEY_P8_BASE64" ]; then
+            printf '%s' "$API_KEY_P8_BASE64" | base64 --decode > "$API_KEY_PATH"
+          fi
 
           security create-keychain -p "$CERTIFICATE_PASSWORD" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
@@ -61,6 +97,7 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F "$SIGNING_IDENTITY"
 
       - name: Build signed Mac App
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -72,6 +109,23 @@ jobs:
             --collect-all whisper \
             --collect-all imageio_ffmpeg \
             transcriber_mac.py
+
+      # Without a Developer ID the app still has to carry a signature, otherwise
+      # arm64 macOS refuses to launch it at all. Ad-hoc signing is enough for that.
+      - name: Build ad-hoc signed Mac App
+        if: steps.caps.outputs.can_sign != 'true'
+        run: |
+          echo "::warning::No Apple Developer ID secrets configured — building an ad-hoc signed app."
+          pyinstaller --noconfirm --windowed --name "$APP_NAME" \
+            --icon assets/icon.icns \
+            --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
+            --collect-all whisper \
+            --collect-all imageio_ffmpeg \
+            transcriber_mac.py
+
+          codesign --force --deep --sign - \
+            --entitlements "$ENTITLEMENTS_PATH" \
+            "$APP_PATH"
 
       - name: Verify app signature
         run: |
@@ -98,6 +152,7 @@ jobs:
             "dist/dmg"
 
       - name: Sign DMG
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -107,11 +162,16 @@ jobs:
 
           codesign --verify --verbose=2 "$DMG_PATH"
 
+      # Notarization failures (expired Apple agreements, notary outages) must not
+      # discard a DMG that is otherwise fine — record the outcome and carry on.
       - name: Notarize DMG
+        id: notarize
+        if: steps.caps.outputs.can_notarize == 'true'
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
+          echo "notarized=false" >> "$GITHUB_OUTPUT"
           submission_id=""
 
           for i in 1 2 3; do
@@ -122,6 +182,7 @@ jobs:
               --key "$API_KEY_PATH" \
               --key-id "$API_KEY_ID" \
               --issuer "$API_ISSUER_ID" \
+              --timeout 30m \
               --wait 2>&1)
             rc=$?
             set -e
@@ -132,12 +193,9 @@ jobs:
               submission_id=$(printf '%s\n' "$output" | awk '/id:/ {print $2; exit}')
             fi
 
-            if [ -n "$submission_id" ]; then
-              echo "Submission ID: $submission_id"
-            fi
-
             if [ "$rc" -eq 0 ]; then
               echo "DMG notarization succeeded"
+              echo "notarized=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
@@ -149,22 +207,137 @@ jobs:
                 --issuer "$API_ISSUER_ID" || true
             fi
 
+            # A 403 means the Apple Developer Program agreements need re-signing
+            # in App Store Connect. Retrying cannot fix that, so stop early.
+            if printf '%s' "$output" | grep -q "HTTP status code: 403"; then
+              echo "::warning::Notarization rejected with HTTP 403 — a required Apple Developer agreement is missing or expired. Sign it at https://appstoreconnect.apple.com (Business → Agreements), then re-run this workflow."
+              break
+            fi
+
             if [ "$i" -lt 3 ]; then
               echo "Retrying in 30 seconds..."
               sleep 30
             fi
           done
 
-          echo "DMG notarization failed after retries"
-          exit 1
+          echo "::warning::DMG notarization did not complete — shipping a signed but un-notarized DMG. Users will need to right-click → Open on first launch."
 
       - name: Staple DMG
+        if: steps.notarize.outputs.notarized == 'true'
         run: |
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
 
+      - name: Summarize DMG
+        id: dmg
+        if: always()
+        env:
+          NOTARIZED: ${{ steps.notarize.outputs.notarized }}
+          CAN_SIGN: ${{ steps.caps.outputs.can_sign }}
+        run: |
+          if [ ! -f "$DMG_PATH" ]; then
+            echo "::error::No DMG was produced at $DMG_PATH"
+            exit 1
+          fi
+
+          size=$(du -h "$DMG_PATH" | cut -f1)
+          sha=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
+
+          if [ "$NOTARIZED" = "true" ]; then
+            status="signed, notarized and stapled — opens normally"
+          elif [ "$CAN_SIGN" = "true" ]; then
+            status="signed but **not notarized** — first launch needs right-click → Open"
+          else
+            status="ad-hoc signed only — first launch needs right-click → Open"
+          fi
+
+          echo "notarized=$NOTARIZED" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## WhisperTranscriber-mac.dmg"
+            echo
+            echo "- Status: $status"
+            echo "- Size: $size"
+            echo "- Architecture: Apple Silicon (arm64)"
+            echo "- SHA-256: \`$sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Always upload, even when a later step failed, so there is something to
+      # download from every run rather than nothing.
       - name: Upload dmg artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: WhisperTranscriber-Mac-DMG
           path: ${{ env.DMG_PATH }}
+          if-no-files-found: error
+          retention-days: 90
+
+      # Actions artifacts expire and require a GitHub login. A release asset is
+      # a permanent, public, direct download.
+      - name: Publish release
+        if: always() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTARIZED: ${{ steps.dmg.outputs.notarized }}
+          DMG_STATUS: ${{ steps.dmg.outputs.status }}
+          DMG_SHA256: ${{ steps.dmg.outputs.sha256 }}
+        run: |
+          if [ ! -f "$DMG_PATH" ]; then
+            echo "No DMG to publish."
+            exit 0
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            title="WhisperTranscriber ${GITHUB_REF_NAME}"
+            prerelease=""
+          else
+            tag="latest-mac"
+            title="WhisperTranscriber — latest macOS build"
+            prerelease="--prerelease"
+          fi
+
+          if [ "$NOTARIZED" = "true" ]; then
+            gatekeeper=$'Double-click the DMG and drag the app to Applications. It is notarized by Apple, so it opens normally.'
+          else
+            gatekeeper=$'This build is **not notarized**, so Gatekeeper blocks it on first launch.\n\nAfter dragging the app to Applications, right-click it and choose **Open**, then confirm. You only need to do this once.\n\nAlternatively, run:\n\n```bash\nxattr -dr com.apple.quarantine /Applications/WhisperTranscriber.app\n```'
+          fi
+
+          notes=$(printf '%s\n' \
+            "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')." \
+            "" \
+            "## Install" \
+            "" \
+            "$gatekeeper" \
+            "" \
+            "## Details" \
+            "" \
+            "- Build status: ${DMG_STATUS}" \
+            "- Requires macOS on **Apple Silicon** (arm64)" \
+            "- Whisper models download on first use and are cached locally" \
+            "- SHA-256: \`${DMG_SHA256}\`")
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # gh release edit --target cannot move a tag that already exists,
+            # so repoint the rolling tag at this commit directly.
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null \
+              || echo "::warning::Could not repoint tag $tag at $GITHUB_SHA"
+
+            gh release edit "$tag" \
+              --title "$title" \
+              --notes "$notes"
+            gh release upload "$tag" "$DMG_PATH" --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$tag" "$DMG_PATH" \
+              --title "$title" \
+              --notes "$notes" \
+              --target "$GITHUB_SHA" \
+              $prerelease
+          fi
+
+          echo "Download: $(gh release view "$tag" --json url --jq .url)"
