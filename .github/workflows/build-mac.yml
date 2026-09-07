@@ -19,13 +19,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
-    timeout-minutes: 90
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: apple-silicon
+            runner: macos-15
+            arch: arm64
+            requires: Apple Silicon (M1 or newer)
+            pins: ""
+          # torch 2.2.2 is the last release with macOS x86_64 wheels, and it
+          # predates the numpy 2 ABI. Everything else in the stack still
+          # resolves from those two pins.
+          - label: intel
+            runner: macos-15-intel
+            arch: x86_64
+            requires: Intel Mac
+            pins: "torch==2.2.2 numpy<2"
+
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     env:
       APP_NAME: WhisperTranscriber
       APP_PATH: dist/WhisperTranscriber.app
-      DMG_PATH: dist/WhisperTranscriber-mac.dmg
+      DMG_PATH: dist/WhisperTranscriber-mac-${{ matrix.label }}.dmg
       ENTITLEMENTS_PATH: entitlements.mac.plist
       KEYCHAIN_PATH: build/app-signing.keychain-db
       CERT_PATH: build/certificate.p12
@@ -40,8 +59,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        env:
+          EXTRA_PINS: ${{ matrix.pins }}
         run: |
-          pip install pyinstaller openai-whisper imageio-ffmpeg
+          python -c "import platform; print('Runner arch:', platform.machine())"
+          pip install pyinstaller openai-whisper imageio-ffmpeg $EXTRA_PINS
+          pip list | grep -Ei "^(torch|numpy|numba|llvmlite|openai-whisper) "
           brew install create-dmg
 
       # Signing and notarization depend on Apple Developer secrets that can
@@ -106,6 +129,7 @@ jobs:
             --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
             --codesign-identity "$SIGNING_IDENTITY" \
             --osx-entitlements-file "$ENTITLEMENTS_PATH" \
+            --target-arch "${{ matrix.arch }}" \
             --collect-all whisper \
             --collect-all imageio_ffmpeg \
             transcriber_mac.py
@@ -119,6 +143,7 @@ jobs:
           pyinstaller --noconfirm --windowed --name "$APP_NAME" \
             --icon assets/icon.icns \
             --osx-bundle-identifier "com.larsoberhofer.whispertranscriber" \
+            --target-arch "${{ matrix.arch }}" \
             --collect-all whisper \
             --collect-all imageio_ffmpeg \
             transcriber_mac.py
@@ -126,6 +151,16 @@ jobs:
           codesign --force --deep --sign - \
             --entitlements "$ENTITLEMENTS_PATH" \
             "$APP_PATH"
+
+      # A bundle built on the wrong runner would install and then fail to launch
+      # with "not supported on this Mac", so make the mismatch a build error.
+      - name: Verify app architecture
+        run: |
+          file "$APP_PATH/Contents/MacOS/$APP_NAME"
+          if ! file "$APP_PATH/Contents/MacOS/$APP_NAME" | grep -q "${{ matrix.arch }}"; then
+            echo "::error::Expected ${{ matrix.arch }} binary, got: $(file "$APP_PATH/Contents/MacOS/$APP_NAME")"
+            exit 1
+          fi
 
       - name: Verify app signature
         run: |
@@ -229,7 +264,6 @@ jobs:
           xcrun stapler validate "$DMG_PATH"
 
       - name: Summarize DMG
-        id: dmg
         if: always()
         env:
           NOTARIZED: ${{ steps.notarize.outputs.notarized }}
@@ -244,50 +278,64 @@ jobs:
           sha=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
 
           if [ "$NOTARIZED" = "true" ]; then
-            status="signed, notarized and stapled — opens normally"
+            status="notarized — opens normally"
           elif [ "$CAN_SIGN" = "true" ]; then
-            status="signed but **not notarized** — first launch needs right-click → Open"
+            status="signed, **not notarized** — first launch needs right-click → Open"
           else
-            status="ad-hoc signed only — first launch needs right-click → Open"
+            status="ad-hoc signed — first launch needs right-click → Open"
           fi
 
-          echo "notarized=$NOTARIZED" >> "$GITHUB_OUTPUT"
-          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
-          echo "status=$status" >> "$GITHUB_OUTPUT"
+          # The release job reads these back to compose the release notes.
+          {
+            echo "label=${{ matrix.label }}"
+            echo "requires=${{ matrix.requires }}"
+            echo "file=$(basename "$DMG_PATH")"
+            echo "sha256=$sha"
+            echo "status=$status"
+          } > "dist/${{ matrix.label }}.status"
 
           {
-            echo "## WhisperTranscriber-mac.dmg"
+            echo "## ${{ matrix.label }} (${{ matrix.arch }})"
             echo
             echo "- Status: $status"
             echo "- Size: $size"
-            echo "- Architecture: Apple Silicon (arm64)"
             echo "- SHA-256: \`$sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Always upload, even when a later step failed, so there is something to
-      # download from every run rather than nothing.
-      - name: Upload dmg artifact
+      - name: Upload build
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: WhisperTranscriber-Mac-DMG
-          path: ${{ env.DMG_PATH }}
+          name: dmg-${{ matrix.label }}
+          path: |
+            ${{ env.DMG_PATH }}
+            dist/${{ matrix.label }}.status
           if-no-files-found: error
           retention-days: 90
 
-      # Actions artifacts expire and require a GitHub login. A release asset is
-      # a permanent, public, direct download.
+  # Publishing once, after both architectures are in, keeps the two matrix legs
+  # from racing each other over the same release.
+  release:
+    needs: build
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dmg-*
+          path: incoming
+          merge-multiple: true
+
       - name: Publish release
-        if: always() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          NOTARIZED: ${{ steps.dmg.outputs.notarized }}
-          DMG_STATUS: ${{ steps.dmg.outputs.status }}
-          DMG_SHA256: ${{ steps.dmg.outputs.sha256 }}
         run: |
-          if [ ! -f "$DMG_PATH" ]; then
-            echo "No DMG to publish."
-            exit 0
+          cd incoming
+          ls -la
+
+          if ! ls ./*.dmg >/dev/null 2>&1; then
+            echo "::error::No DMG reached the release job."
+            exit 1
           fi
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
@@ -300,38 +348,52 @@ jobs:
             prerelease="--prerelease"
           fi
 
-          if [ "$NOTARIZED" = "true" ]; then
-            gatekeeper=$'Double-click the DMG and drag the app to Applications. It is notarized by Apple, so it opens normally.'
-          else
-            gatekeeper=$'This build is **not notarized**, so Gatekeeper blocks it on first launch.\n\nAfter dragging the app to Applications, right-click it and choose **Open**, then confirm. You only need to do this once.\n\nAlternatively, run:\n\n```bash\nxattr -dr com.apple.quarantine /Applications/WhisperTranscriber.app\n```'
-          fi
+          {
+            echo "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo
+            echo "## Which file do I want?"
+            echo
+            echo "| Download | For | Status |"
+            echo "|---|---|---|"
+            for s in ./*.status; do
+              [ -f "$s" ] || continue
+              # shellcheck disable=SC1090
+              file=$(sed -n 's/^file=//p' "$s")
+              requires=$(sed -n 's/^requires=//p' "$s")
+              status=$(sed -n 's/^status=//p' "$s")
+              echo "| \`$file\` | $requires | $status |"
+            done
+            echo
+            echo "Not sure which Mac you have? Apple menu → About This Mac. A"
+            echo "\"Chip\" line starting with Apple means Apple Silicon; a"
+            echo "\"Processor\" line naming Intel means Intel."
+            echo
+            echo "## Install"
+            echo
+            echo "Open the DMG and drag the app to Applications."
+            echo
+            echo "If macOS refuses to open it, the build is not notarized:"
+            echo "right-click the app and choose **Open**, then confirm. Once only."
+            echo
+            echo "## Checksums"
+            echo
+            for s in ./*.status; do
+              [ -f "$s" ] || continue
+              file=$(sed -n 's/^file=//p' "$s")
+              sha=$(sed -n 's/^sha256=//p' "$s")
+              echo "- \`$file\` — \`$sha\`"
+            done
+            echo
+            echo "Whisper models download on first use and are cached locally."
+          } > notes.md
 
-          if [ "$tag" = "latest-mac" ]; then
-            notes=$(printf '%s\n' \
-              "Built from \`${GITHUB_SHA}\` on $(date -u '+%Y-%m-%d %H:%M UTC')." \
-              "" \
-              "## Install" \
-              "" \
-              "$gatekeeper" \
-              "" \
-              "## Details" \
-              "" \
-              "- Build status: ${DMG_STATUS}" \
-              "- Requires macOS on **Apple Silicon** (arm64)" \
-              "- Whisper models download on first use and are cached locally" \
-              "- SHA-256: \`${DMG_SHA256}\`")
-          else
-            notes="Downloads for macOS and Windows are attached below. See the [README](https://github.com/${GITHUB_REPOSITORY}#download) for install steps."
-          fi
-
-          # A v* tag runs this workflow and the Windows one at the same time, so the
-          # release may appear between the check and the create. Tolerate that and
-          # let the upload be the step that matters.
+          # A v* tag runs this workflow and the Windows one at the same time, so
+          # the release may appear between the check and the create.
           if ! gh release view "$tag" >/dev/null 2>&1; then
             # shellcheck disable=SC2086
             gh release create "$tag" \
               --title "$title" \
-              --notes "$notes" \
+              --notes-file notes.md \
               --target "$GITHUB_SHA" \
               $prerelease || echo "Release already created by a concurrent job."
           elif [ "$tag" = "latest-mac" ]; then
@@ -340,9 +402,12 @@ jobs:
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null \
               || echo "::warning::Could not repoint tag $tag at $GITHUB_SHA"
-            gh release edit "$tag" --title "$title" --notes "$notes"
+            gh release edit "$tag" --title "$title" --notes-file notes.md
           fi
 
-          gh release upload "$tag" "$DMG_PATH" --clobber
+          for dmg in ./*.dmg; do
+            echo "Uploading $dmg"
+            gh release upload "$tag" "$dmg" --clobber
+          done
 
           echo "Download: $(gh release view "$tag" --json url --jq .url)"
