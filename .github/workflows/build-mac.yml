@@ -69,7 +69,7 @@ jobs:
           # to compile it against an LLVM the runner does not have. Failing on a
           # missing wheel is far easier to diagnose than a CMake error.
           pip install --only-binary=torch,numpy,numba,llvmlite,tiktoken \
-            pyinstaller openai-whisper imageio-ffmpeg $EXTRA_PINS
+            pyinstaller openai-whisper imageio-ffmpeg truststore $EXTRA_PINS
           pip list | grep -Ei "^(torch|numpy|numba|llvmlite|openai-whisper) "
           brew install create-dmg
 

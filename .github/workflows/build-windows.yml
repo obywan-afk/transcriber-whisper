@@ -34,7 +34,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pyinstaller openai-whisper imageio-ffmpeg
+        run: pip install pyinstaller openai-whisper imageio-ffmpeg truststore
 
       # One-dir, not one-file: bundling torch into a single executable produces a
       # ~2 GB binary that re-extracts itself on every launch. The folder build

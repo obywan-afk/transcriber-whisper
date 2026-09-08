@@ -11,6 +11,15 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
+# Corporate networks often TLS-inspect with a proxy root CA that is trusted by
+# the OS (Keychain) but not by Python's bundled certs, so model downloads fail
+# with CERTIFICATE_VERIFY_FAILED. Defer verification to the OS trust store.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import threading
